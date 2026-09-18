@@ -335,7 +335,6 @@ class PddbridgeSource:
                 from .pdd_recv import NativeReceiver
 
                 self._native_recv = NativeReceiver(self.feed_native_frame, self.cfg).start()
-                log.info("原生接收通道已启动（slot=%s）", self.cfg.get("recv_slot"))
             except Exception as exc:
                 log.warning("原生接收通道启动失败: %s", exc)
         if (native_send or native_recv) and self._inject_watcher is None:
@@ -347,6 +346,9 @@ class PddbridgeSource:
                 self._inject_watcher.start()
             except Exception as exc:
                 log.warning("注入器启动失败, 继续用 CDP: %s", exc)
+        # 探针/转发配置必须在注入完成后下发（管道由 DLL 创建）; 失败自动重试
+        if native_recv and self._native_recv is not None:
+            self._apply_native_recv_config()
         if self._push.port is None:
             try:
                 log.info("pddbridge 推送通道监听 127.0.0.1:%s", self._push.start())
@@ -812,12 +814,56 @@ class PddbridgeSource:
         if not self.sessions:
             self.port = None
 
+    def _apply_native_recv_config(self) -> None:
+        """把探针/转发配置下发给 DLL; 管道未就绪（注入中）时后台重试。"""
+        slot = int(self.cfg.get("recv_slot") or -1)
+        recv = self._native_recv
+        if recv is None or getattr(recv, "_native_cfg_done", False):
+            return
+
+        def apply() -> None:
+            probe_path = Path(str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl"))
+            probe_path = probe_path.with_name("pdd_recv_probe.log")
+            for _ in range(6):
+                if self._stop_evt.is_set():
+                    return
+                reply = recv.probe(str(probe_path)) if slot < 0 else recv.configure()
+                if reply and not reply.startswith("pipe_"):
+                    recv._native_cfg_done = True
+                    if slot < 0:
+                        log.info("原生接收探针已开启: %s （买家发一条消息后查看 SLOT 号）", probe_path)
+                    else:
+                        log.info("原生接收通道已启动（slot=%s）", slot)
+                    return
+                time.sleep(5.0)
+            log.warning("原生接收配置下发失败（管道未就绪），下轮重扫会重试")
+
+        threading.Thread(target=apply, daemon=True, name="pdd-native-cfg").start()
+
     def _health_check(self) -> None:
         for session in list(self.sessions):
             if not pdd_cdp.is_alive(session.port):
                 log.warning("health check failed %s -> 丢弃该会话", session.label())
                 self._drop_session(session)
                 continue
+            # socket 存活检查: 钩子活着但工作台未建 IM WebSocket（无打开会话）时
+            # 不会有任何推送, 静默等价于不收消息 —— 必须大声说出来。
+            try:
+                r = session.cdp.eval(
+                    "(function(){var su=window.socketUtil;"
+                    "return JSON.stringify({uid:new URLSearchParams(location.search).get('uid')||'',"
+                    " st:(su&&su.socket)?(su.socket.readyState==null?'none':su.socket.readyState):'no_socket'});})()",
+                    session.cid)
+                info = json.loads(r) if isinstance(r, str) else {}
+                session.socket_state = str(info.get("st") or "unknown")
+                if session.socket_state not in ("1", "open"):
+                    self._warn_throttled(
+                        "socket_dead",
+                        "工作台聊天 socket 未连接(state=%s uid=%s): 未打开会话时 PDD 不推送, "
+                        "打开任意买家会话即可恢复接收" % (session.socket_state, info.get("uid", "")),
+                        interval=120.0)
+            except Exception:
+                session.socket_state = "probe_failed"
             self._refresh_account_hint(session)
         self._last_health = time.time()
 

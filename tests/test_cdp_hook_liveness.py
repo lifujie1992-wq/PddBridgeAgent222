@@ -498,7 +498,7 @@ def test_existing_tanyu_log_dir_is_kept(tmp_path):
 def test_version_and_gateway_stay_in_lockstep():
     from bridge import __version__
     from run_frontend_service import LOCAL_GATEWAY_VERSION
-    assert __version__ == LOCAL_GATEWAY_VERSION == "0.7.0.0"
+    assert __version__ == LOCAL_GATEWAY_VERSION == "0.7.0.1"
 
 
 # ---------------------------------------------------------------- 注入脚本本体

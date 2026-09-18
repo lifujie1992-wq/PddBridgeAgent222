@@ -63,7 +63,10 @@ def machine_device_id() -> str:
         except (OSError, ImportError):
             machine_guid = ""
     if machine_guid:
-        source = "windows-machine-guid\0" + machine_guid.lower()
+        # 克隆盘会连注册表一起复制, MachineGuid 不再唯一; 追加网卡 MAC
+        # （硬件地址, 克隆盘不会复制）保证克隆机身份不同。
+        source = ("windows-machine-guid\0" + machine_guid.lower()
+                  + "\0mac\0%012x" % uuid.getnode())
     else:
         source = "host-mac\0%s\0%012x" % (socket.gethostname().lower(), uuid.getnode())
     digest = hashlib.sha256(
@@ -177,7 +180,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
     if not out["agent_id"]:
         out["agent_id"] = (
             f"{plat}-"
-            f"{uuid.uuid5(uuid.NAMESPACE_DNS, socket.gethostname() + '|' + str(cfg_path.resolve())).hex[:12]}"
+            f"{uuid.uuid5(uuid.NAMESPACE_DNS, socket.gethostname() + '|' + str(cfg_path.resolve()) + '|' + '%012x' % uuid.getnode()).hex[:12]}"
         )
     return out
 

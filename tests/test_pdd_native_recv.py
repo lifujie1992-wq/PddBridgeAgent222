@@ -92,3 +92,23 @@ def test_receiver_pump_parses_stream_and_survives_bad_frame(monkeypatch):
     monkeypatch.setattr(module, "open", fake_open, raising=False)
     recv._pump()
     assert len(frames) == 2 and all(f == PUSH for f in frames)
+
+
+def test_identity_derivation_differs_by_mac(monkeypatch):
+    """克隆盘复制了注册表 MachineGuid, 只有 MAC 能区分两台机器 ——
+    身份派生必须包含 MAC, 否则两台桥接以同一身份注册中心互相顶号。"""
+    import uuid
+    from bridge import config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod.uuid, "getnode", lambda: 0xAAAAAAAAAAAA)
+    d1 = cfg_mod.machine_device_id()
+    monkeypatch.setattr(cfg_mod.uuid, "getnode", lambda: 0xBBBBBBBBBBBB)
+    d2 = cfg_mod.machine_device_id()
+    assert d1 != d2 and d1.startswith("device-")
+
+    import socket as _socket
+    monkeypatch.setattr(cfg_mod.uuid, "getnode", lambda: 0xAAAAAAAAAAAA)
+    a1 = uuid.uuid5(uuid.NAMESPACE_DNS, _socket.gethostname() + "|x|" + "%012x" % 0xAAAAAAAAAAAA).hex[:12]
+    monkeypatch.setattr(cfg_mod.uuid, "getnode", lambda: 0xBBBBBBBBBBBB)
+    a2 = uuid.uuid5(uuid.NAMESPACE_DNS, _socket.gethostname() + "|x|" + "%012x" % 0xBBBBBBBBBBBB).hex[:12]
+    assert a1 != a2

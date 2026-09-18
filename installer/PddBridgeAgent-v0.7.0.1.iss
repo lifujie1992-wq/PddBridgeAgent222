@@ -1,6 +1,6 @@
 ﻿#define MyAppChinese "拼多多桥接助手"
-#define MyAppVersion "0.7.0.0"
-#define MySource "D:/temp/PddBridgeAgent-v0.5.14-source/build-dist-0700/agent/PddBridgeAgent"
+#define MyAppVersion "0.7.0.1"
+#define MySource "D:/temp/PddBridgeAgent-v0.5.14-source/build-dist-0701/agent/PddBridgeAgent"
 #define MyDockConfig "D:/temp/PddBridgeAgent-v0.5.14-source/pdd_adsorb_config.json"
 
 [Setup]
@@ -19,7 +19,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 OutputDir=D:/temp/delivery
-OutputBaseFilename=PddBridgeAgent-v0.7.0.0
+OutputBaseFilename=PddBridgeAgent-v0.7.0.1
 DisableDirPage=no
 
 [Messages]

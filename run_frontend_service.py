@@ -33,7 +33,7 @@ BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
 DEFAULT_BACKEND = "http://47.107.138.228:18765"
 DEFAULT_PORT = 18767
-LOCAL_GATEWAY_VERSION = "0.7.0.0"
+LOCAL_GATEWAY_VERSION = "0.7.0.1"
 _SENSITIVE_PROXY_HEADERS = {
     "host",
     "content-length",
