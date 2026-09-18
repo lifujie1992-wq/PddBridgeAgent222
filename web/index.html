@@ -1,0 +1,3804 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>聚合接待</title>
+  <link rel="stylesheet" href="/static/capabilities.css" />
+  <style>
+    :root {
+      --brand: #0b57d0;
+      --brand-hover: #0847ad;
+      --brand-soft: #eaf2ff;
+      --brand-line: #c8dcff;
+      --bg: #f3f5f8;
+      --panel: #ffffff;
+      --border: #e3e7ee;
+      --text: #18202a;
+      --muted: #687386;
+      --sub: #98a2b3;
+      --danger: #e5484d;
+      --ok: #16a36a;
+      --warning: #b7791f;
+      --user-bg: #ffffff;
+      --cs-bg: #eaf2ff;
+      --shadow: 0 12px 32px rgba(15, 23, 42, .14);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+      background: transparent;
+      color: var(--text);
+      overflow: hidden;
+      user-select: none;
+    }
+    button, input, textarea, select { font: inherit; }
+    button { -webkit-tap-highlight-color: transparent; }
+    .shell {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid #d1d7e0;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+    .titlebar {
+      flex: 0 0 42px;
+      height: 42px;
+      background: linear-gradient(135deg, #0b57d0, #174ea6);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px 0 12px;
+      -webkit-app-region: drag;
+      app-region: drag;
+    }
+    .titlebar .left { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; font-weight: 600; }
+    .titlebar .logo {
+      width: 20px; height: 20px; border-radius: 6px;
+      background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.22);
+      display: grid; place-items: center; font-size: 11px; font-weight: 700;
+    }
+    .titlebar .right { display: flex; gap: 1px; -webkit-app-region: no-drag; app-region: no-drag; }
+    .tbtn {
+      width: 28px; height: 28px; border: 0; background: transparent; color: #fff;
+      border-radius: 6px; cursor: pointer; display: grid; place-items: center; font-size: 14px;
+    }
+    .tbtn:hover { background: rgba(255,255,255,.14); }
+    .tbtn.active { background: rgba(255,255,255,.22); }
+    .body { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--bg); }
+    /* 三段式工作台：左会话列表 | 中对话详情 | 右白盒 */
+    .workbench-tri {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(340px, 1.25fr) minmax(300px, 0.95fr);
+      background: var(--bg);
+    }
+    .list-pane, .chat-pane, .inspector-pane {
+      position: relative; inset: auto;
+      min-width: 0; min-height: 0;
+      display: flex; flex-direction: column; background: var(--panel);
+      transform: none !important; opacity: 1 !important; pointer-events: auto !important;
+    }
+    .list-pane { border-right: 1px solid var(--border); z-index: 2; }
+    .chat-pane { border-right: 1px solid var(--border); }
+    .inspector-pane { background: #f8fafc; }
+    .col-head {
+      flex: 0 0 42px; min-height: 42px; padding: 0 10px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      border-bottom: 1px solid var(--border); background: #fff;
+      font-size: 12px; font-weight: 700; color: #24344d;
+    }
+    .col-head .sub { font-size: 10px; font-weight: 500; color: var(--muted); }
+    .col-head-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .col-head-actions .btn.compact { height: 26px; padding: 0 7px; font-size: 10px; }
+    .shop-filter { flex: 0 1 124px; min-width: 84px; max-width: 124px; }
+    .shop-filter[hidden] { display: none; }
+    .shop-select {
+      display: block; width: 100%; height: 34px; min-width: 0;
+      border: 1px solid var(--border); border-radius: 9px; padding: 0 7px;
+      background: #f8fafc; color: #334155; font-size: 11px; outline: none; cursor: pointer;
+    }
+    .shop-select:hover { border-color: #b8c4d4; background: #fff; }
+    .shop-select:focus { border-color: var(--brand); background: #fff; box-shadow: 0 0 0 3px rgba(11,87,208,.08); }
+    .sess-group {
+      margin: 5px 8px 3px; padding: 0 4px;
+      font-size: 10px; font-weight: 700; color: #6b7a8f; letter-spacing: .02em;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .sess-group::after {
+      content: ""; flex: 1; height: 1px; background: #e5e9ef;
+    }
+    .sess .handoff-tag {
+      flex: 0 0 auto; font-size: 9px; color: #9a3412; background: #ffedd5;
+      border: 1px solid #fdba74; border-radius: 4px; padding: 0 4px; line-height: 14px;
+      font-weight: 700;
+    }
+    .sess .handoff-tag.human-handled {
+      color: #166534; background: #ecfdf3; border-color: #86d5a7;
+    }
+    .sess .ai-state-btn, .sess .ai-state-label {
+      display: block; min-width: 42px; height: 22px; margin-top: 4px; padding: 0 5px;
+      border: 1px solid #cbd5e1; border-radius: 5px; background: #f8fafc; color: #475569;
+      font-size: 9px; font-weight: 700; line-height: 20px; text-align: center; white-space: nowrap;
+    }
+    .sess .ai-state-btn { cursor: pointer; }
+    .sess .ai-state-btn.active { border-color: #86efac; background: #f0fdf4; color: #15803d; }
+    .sess .ai-state-btn.active:hover { border-color: #fca5a5; background: #fef2f2; color: #b91c1c; }
+    .sess .ai-state-btn.paused, .sess .ai-state-btn.handoff { border-color: #fbbf24; background: #fffbeb; color: #92400e; }
+    .sess .ai-state-btn:disabled { opacity: .6; cursor: wait; }
+    .sess .ai-state-label.shadow { color: #64748b; background: #f1f5f9; }
+    .sess.handoff-row { background: linear-gradient(90deg, #fff7ed 0%, #fff 48%); }
+    .sess.human-handled-row { background: linear-gradient(90deg, #f0fdf4 0%, #fff 48%); }
+    .sess.handoff-row.active { background: var(--brand-soft); }
+    .sess.human-handled-row.active { background: var(--brand-soft); }
+    .list-toolbar {
+      flex: 0 0 auto; padding: 9px 10px 10px; background: #fff;
+      border-bottom: 1px solid var(--border); box-shadow: 0 2px 8px rgba(15,23,42,.03); z-index: 2;
+    }
+    .toolbar-row { display: flex; align-items: center; gap: 7px; }
+    .toolbar-row + .toolbar-row { margin-top: 8px; }
+    .tabs { display: flex; gap: 4px; flex: 1; }
+    .tab {
+      border: 0; background: transparent; color: var(--muted); font-size: 12px;
+      min-width: 44px; height: 30px; padding: 0 9px; border-radius: 8px; cursor: pointer;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .tab.active { background: var(--brand-soft); color: var(--brand); font-weight: 700; }
+    .tab-badge {
+      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: #dc2626; color: #fff; font-size: 10px; font-weight: 700;
+    }
+    .search-wrap { position: relative; flex: 1; min-width: 0; }
+    .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--sub); font-size: 13px; pointer-events: none; }
+    .search {
+      width: 100%; height: 34px; border: 1px solid var(--border); border-radius: 9px;
+      padding: 0 10px 0 30px; font-size: 12px; outline: none; background: #f8fafc;
+      color: var(--text); user-select: text;
+    }
+    .search:focus { border-color: var(--brand); background: #fff; box-shadow: 0 0 0 3px rgba(11,87,208,.08); }
+    .list { flex: 1; min-height: 0; overflow: auto; background: var(--bg); padding: 6px 0 10px; scrollbar-gutter: stable; }
+    .sess {
+      display: grid; grid-template-columns: 42px minmax(0,1fr) auto; gap: 10px;
+      margin: 0 7px 5px; padding: 11px 10px; background: #fff; border: 1px solid transparent;
+      border-radius: 10px; cursor: pointer; transition: background .12s, border-color .12s, transform .12s;
+    }
+    .sess:hover { background: #f9fbff; border-color: var(--brand-line); }
+    .sess:active { transform: scale(.995); }
+    .sess.active { background: var(--brand-soft); border-color: var(--brand-line); }
+    .avatar {
+      width: 42px; height: 42px; border-radius: 13px;
+      background: linear-gradient(135deg, #68a7ff, #0b57d0); color: #fff;
+      display: grid; place-items: center; font-size: 14px; font-weight: 700;
+      box-shadow: 0 3px 8px rgba(11,87,208,.18);
+    }
+    .sess .mid { min-width: 0; padding-top: 1px; }
+    .sess .name-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; min-width: 0; }
+    .sess .name { min-width: 0; font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .platform { flex: 0 0 auto; font-size: 9px; color: #fff; background: #e11d48; border-radius: 4px; padding: 1px 4px; line-height: 14px; }
+    .platform.platform-pdd { background: #e11d48; }
+    .platform.platform-tb { background: #ff6a00; }
+    .platform.platform-jd { background: #c8161d; }
+    .platform.platform-dy { background: #111111; }
+    .platform.platform-ks { background: #ff4906; }
+    .platform.platform-1688 { background: #ff6600; }
+    .platform.platform-unknown { background: #94a3b8; }
+    .preview { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .right-col { text-align: right; min-width: 38px; }
+    .time { font-size: 10px; color: var(--sub); margin: 2px 0 7px; }
+    .badge { display: inline-flex; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 10px; align-items: center; justify-content: center; }
+    .chat-head {
+      flex: 0 0 52px; min-width: 0; padding: 7px 10px;
+      display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.98); box-shadow: 0 2px 8px rgba(15,23,42,.035); z-index: 2;
+    }
+    .back-btn { display: none; } /* 三段式常驻列表，不再需要返回 */
+    .chat-identity { flex: 1; min-width: 0; }
+    .chat-head .t { font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chat-head .s { margin-top: 2px; font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chat-head-actions { display: flex; align-items: center; gap: 5px; }
+    .chat-workspace {
+      flex: 1; min-height: 0; display: flex; flex-direction: column;
+      background: var(--bg);
+    }
+    .conversation-panel, .inspector-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; flex: 1; }
+    .conversation-panel { background: #fff; }
+    .inspector-panel { background: #f8fafc; }
+    .inspector-head {
+      flex: 0 0 47px; padding: 8px 12px; display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; border-bottom: 1px solid var(--border); background: #fff;
+    }
+    .inspector-head-main { min-width: 0; }
+    .inspector-head .t { font-size: 13px; font-weight: 800; color: #24344d; }
+    .inspector-head .s { margin-top: 2px; font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inspector-badge { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; background: var(--brand-soft); color: var(--brand); font-size: 10px; font-weight: 700; }
+    .inspector-content { flex: 1; min-height: 0; overflow: auto; padding: 11px; user-select: text; overscroll-behavior: contain; scrollbar-gutter: stable; }
+    .inspector-empty { margin: 56px auto; max-width: 280px; padding: 0 18px; text-align: center; color: var(--sub); font-size: 12px; line-height: 1.8; }
+    .inspector-card { margin-bottom: 10px; border: 1px solid #dce3ec; border-radius: 10px; background: #fff; overflow: hidden; box-shadow: 0 1px 3px rgba(15,23,42,.035); }
+    .inspector-card-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #e7ebf1; background: #f7f9fc; color: #334155; font-size: 11px; font-weight: 800; }
+    .order-state-tag { flex: 0 0 auto; padding: 2px 6px; border: 1px solid #d5dbe4; border-radius: 4px; background: #eef1f5; color: #64748b; font-size: 9px; font-weight: 800; line-height: 15px; }
+    .order-state-tag.ordered { border-color: #b9e5ca; background: #e8f7ee; color: #137044; }
+    .order-state-tag.no-order { border-color: #f1d49a; background: #fff5df; color: #946200; }
+    .inspector-message { padding: 10px; color: #1f2937; font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+    .inspector-facts { display: grid; grid-template-columns: 1fr 1fr; }
+    .inspector-fact { min-width: 0; padding: 7px 10px; border-bottom: 1px solid #eef1f5; }
+    .inspector-fact:nth-child(odd) { border-right: 1px solid #eef1f5; }
+    .inspector-fact .k { margin-bottom: 3px; color: var(--sub); font-size: 9px; }
+    .inspector-fact .v { color: #334155; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; user-select: text; }
+    .inspector-section-note { margin: 8px 0 10px; padding: 8px 10px; border: 1px dashed #c9d5e5; border-radius: 8px; background: #f6f9fd; color: #607087; font-size: 11px; line-height: 1.55; }
+    .inspector-content > .whitebox { margin-top: 0; padding-top: 0; border-top: 0; }
+    .messages {
+      flex: 1; min-height: 0; overflow: auto; padding: 12px 9px 18px;
+      background: linear-gradient(180deg, #f7f9fc 0%, #f3f5f8 100%);
+      user-select: text; overscroll-behavior: contain; scrollbar-gutter: stable;
+    }
+    .bubble-row { display: flex; margin-bottom: 8px; padding: 4px 6px; border-radius: 12px; cursor: pointer; transition: background .12s ease; outline: none; }
+    .bubble-row:hover { background: rgba(11,87,208,.045); }
+    .bubble-row:focus-visible { box-shadow: inset 0 0 0 2px rgba(11,87,208,.35); }
+    .bubble-row.selected { background: rgba(11,87,208,.09); }
+    .bubble-row.selected .bubble { box-shadow: 0 0 0 2px rgba(11,87,208,.34), 0 3px 10px rgba(15,23,42,.08); }
+    .bubble-row.user { justify-content: flex-start; }
+    .bubble-row.mall_cs, .bubble-row.assistant_simulated { justify-content: flex-end; }
+    .bubble {
+      max-width: 84%; padding: 9px 11px; border-radius: 12px;
+      font-size: 13px; line-height: 1.55; word-break: break-word;
+      box-shadow: 0 1px 3px rgba(15,23,42,.05);
+    }
+    .bubble.user { background: var(--user-bg); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+    .bubble.mall_cs { background: var(--cs-bg); border: 1px solid var(--brand-line); color: #10213a; border-bottom-right-radius: 4px; }
+    .bubble.assistant_simulated {
+      width: calc(100% - 8px); max-width: calc(100% - 8px); background: #fff;
+      border: 1px solid #a9bddb; border-left: 3px solid var(--brand); color: #26364c;
+      border-radius: 10px 10px 4px 10px;
+    }
+    .bubble .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 16px; font-size: 10px; color: var(--sub); margin-bottom: 5px; }
+    .bubble.assistant_simulated .meta { color: #4d6b99; font-weight: 700; }
+    .message-ref { display: inline-flex; align-items: center; min-height: 17px; padding: 0 5px; border: 1px solid #c4cedb; border-radius: 4px; background: #f5f7fa; color: #334155; font-size: 9px; font-weight: 800; line-height: 1; }
+    .shadow-latency-tag { display: inline-flex; align-items: center; min-height: 17px; padding: 0 5px; border: 1px solid #acd7c0; border-radius: 4px; background: #edf8f2; color: #17663e; font-size: 9px; font-weight: 800; line-height: 1; }
+    .msg-text { white-space: pre-wrap; }
+    .consult-product-card {
+      display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 9px;
+      margin-top: 9px; padding: 8px; border: 1px solid #d7e0ec; border-radius: 8px;
+      background: #fff; color: #1f2937; box-shadow: 0 1px 2px rgba(15,23,42,.04);
+    }
+    .consult-product-thumb {
+      width: 64px; height: 64px; border-radius: 8px; object-fit: cover;
+      border: 1px solid #e5eaf1; background: #f3f5f8;
+    }
+    .consult-product-thumb.placeholder {
+      display: flex; align-items: center; justify-content: center; color: #8090a6; font-size: 11px;
+    }
+    .consult-product-main { min-width: 0; }
+    .consult-product-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+    .consult-product-label { color: #52647d; font-size: 10px; font-weight: 700; }
+    .consult-product-badge {
+      padding: 1px 5px; border-radius: 999px; background: #fff4dc; color: #9a5b00;
+      font-size: 9px; font-weight: 700;
+    }
+    .consult-product-badge.ordered { background: #e8f6ee; color: #137044; }
+    .consult-product-badge.unknown { background: #eef1f5; color: #64748b; }
+    .consult-product-title {
+      color: #172033; font-size: 12px; font-weight: 700; line-height: 1.45;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+    }
+    .consult-product-meta { margin-top: 3px; color: #68778d; font-size: 10px; line-height: 1.45; word-break: break-all; }
+    .consult-product-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
+    .consult-product-price { color: #d9480f; font-size: 12px; font-weight: 800; }
+    .consult-product-link { color: var(--brand); font-size: 10px; font-weight: 700; text-decoration: none; }
+    .consult-product-link:hover { text-decoration: underline; }
+    .inspect-hint { margin-top: 7px; color: #58749e; font-size: 10px; font-weight: 700; }
+    .shadow-actions { margin-top: 8px; display: flex; gap: 6px; }
+    .shadow-run {
+      border: 1px solid var(--brand-line); background: #f1f6ff; color: var(--brand);
+      border-radius: 7px; padding: 5px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    .shadow-run:hover { background: #e2edff; }
+    .shadow-run:disabled { opacity: .55; cursor: wait; }
+    .whitebox { margin-top: 10px; border-top: 1px dashed #b9c5d5; padding-top: 9px; }
+    .tracebar { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+    .trace-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 7px; border-radius: 999px; background: #edf1f6; color: #526176; font-size: 10px; }
+    .trace-pill.ok { background: #e2f8eb; color: #157347; }
+    .trace-pill.warn { background: #fff4d6; color: #946200; }
+    .trace-error { margin: 7px 0; padding: 7px 8px; border-radius: 7px; background: #fff0f0; color: #b42318; font-size: 11px; white-space: pre-wrap; }
+    .wb-story { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+    .wb-summary {
+      padding: 10px 12px; border-radius: 10px; background: linear-gradient(135deg, #f0f6ff, #f8fafc);
+      border: 1px solid #d5e3f7; color: #1e3a5f; font-size: 12.5px; line-height: 1.55; font-weight: 600;
+    }
+    .wb-board {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+      border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; background: #fff;
+    }
+    .wb-board-row {
+      display: flex; flex-direction: column; gap: 2px; padding: 7px 9px;
+      border-bottom: 1px solid #eef2f7; border-right: 1px solid #eef2f7; min-width: 0;
+    }
+    .wb-board-row:nth-child(2n) { border-right: 0; }
+    .wb-board-row:nth-last-child(-n+2) { border-bottom: 0; }
+    .wb-board-row .k { color: #64748b; font-size: 10px; font-weight: 600; }
+    .wb-board-row .v { color: #1e293b; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+    .wb-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+    .wb-step {
+      display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start;
+      padding: 8px 10px; border-radius: 9px; background: #fff; border: 1px solid #e3e8ef;
+    }
+    .wb-step .n {
+      width: 22px; height: 22px; border-radius: 50%; background: #e8f0ff; color: var(--brand);
+      font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+    }
+    .wb-step .body { min-width: 0; }
+    .wb-step .t { font-size: 12px; font-weight: 700; color: #243447; margin-bottom: 2px; }
+    .wb-step .d { font-size: 11.5px; color: #4b5b6f; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .wb-kv { display: grid; grid-template-columns: 72px 1fr; gap: 4px 8px; font-size: 11.5px; margin-top: 4px; }
+    .wb-kv .k { color: #7a8799; }
+    .wb-kv .v { color: #2a3648; word-break: break-word; }
+    .wb-note { font-size: 11px; color: #6b7a8d; line-height: 1.45; padding: 0 2px; }
+    .whitebox details { margin-top: 6px; border: 1px solid #d9e0e9; border-radius: 8px; background: #fff; overflow: hidden; }
+    .whitebox details[open] { border-color: #b9cae3; box-shadow: 0 2px 8px rgba(15,23,42,.035); }
+    .whitebox summary { cursor: pointer; padding: 7px 9px; font-size: 11px; color: #34445a; font-weight: 700; background: #fbfcfe; }
+    .whitebox details[open] summary { color: var(--brand); background: #f4f8ff; }
+    .whitebox pre { margin: 0; border-top: 1px solid #e5e9ef; padding: 9px; max-height: 340px; overflow: auto; color: #334155; font: 11px/1.55 Consolas, "Microsoft YaHei", monospace; white-space: pre-wrap; word-break: break-word; user-select: text; }
+    .correction-form { padding: 9px; border-top: 1px solid #e5e9ef; display: grid; gap: 8px; background: #fffdf8; }
+    .correction-form label { display: grid; gap: 4px; color: #475569; font-size: 11px; }
+    .correction-form textarea, .correction-form input, .correction-form select { width: 100%; border: 1px solid #cbd5e1; border-radius: 7px; padding: 7px 8px; font: 11px/1.45 "Microsoft YaHei", sans-serif; color: #1f2937; background: #fff; user-select: text; }
+    .correction-form textarea { min-height: 82px; resize: vertical; }
+    .correction-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .correction-submit { justify-self: start; border: 1px solid #f2b84b; color: #8a5800; background: #fff8e8; border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .correction-submit:disabled { opacity: .55; cursor: wait; }
+    .correction-saved { padding: 7px 9px; border-radius: 7px; background: #eaf9f0; color: #166534; font-size: 11px; }
+    .composer { flex: 0 0 auto; border-top: 1px solid var(--border); background: #fff; padding: 7px 9px 9px; }
+    .composer-note { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 6px; font-size: 10px; color: var(--muted); }
+    .safe-note { color: #157347; font-weight: 700; }
+    .safe-note.live { color: #a15c00; }
+    .composer-main { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; }
+    .composer textarea { height: 60px; resize: none; border: 1px solid var(--border); border-radius: 9px; padding: 8px 9px; font-size: 12px; line-height: 1.45; font-family: inherit; outline: none; user-select: text; }
+    .composer textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(11,87,208,.07); }
+    .composer-quick { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+    .composer-quick .chip {
+      border: 1px solid #d5deea; background: #f5f8fc; color: #35507a;
+      border-radius: 999px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+    }
+    .composer-quick .chip:hover { background: #e8f0ff; border-color: #9bb8e8; color: #0b57d0; }
+    .composer-quick.hidden { display: none; }
+    .composer-opt {
+      display: flex; align-items: flex-start; gap: 6px;
+      margin: 0 0 8px; font-size: 11px; color: #5b6b82; line-height: 1.4; cursor: pointer;
+    }
+    .composer-opt input { margin-top: 2px; }
+    .composer-opt.hidden { display: none; }
+    .manual-send-control {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      margin: 5px 0 7px; padding: 6px 8px; border: 1px solid #eadfca; border-radius: 8px;
+      background: #fffaf1; color: #76521b; font-size: 10px;
+    }
+    .manual-send-control label { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; cursor: pointer; }
+    .manual-send-control input:disabled + span { opacity: .55; cursor: not-allowed; }
+    .manual-send-state { color: #8a6a35; text-align: right; }
+    .manual-send-state.armed { color: #b54708; font-weight: 700; }
+    #btnQuick.manual-armed { background: #fff0db; color: #a34700; border-color: #f1c27d; }
+    #btnQuick.manual-armed:hover { background: #ffe5bd; }
+    .composer .actions { display: flex; flex-direction: column; gap: 6px; }
+    .btn { border: 0; border-radius: 7px; height: 30px; padding: 0 10px; font-size: 11px; cursor: pointer; font-weight: 700; white-space: nowrap; }
+    .btn.primary { background: var(--brand); color: #fff; }
+    .btn.primary:hover { background: var(--brand-hover); }
+    .btn.primary:disabled, .btn.ghost:disabled { opacity: .45; cursor: not-allowed; }
+    .btn.ghost { background: #f0f3f7; color: #344054; border: 1px solid #e5e9ef; }
+    .btn.ghost:hover { background: #e8edf4; }
+    .btn.export { background: #eef8f2; color: #147346; border: 1px solid #cdebd9; }
+    .btn.export:hover { background: #e3f4ea; }
+    .btn.compact { height: 32px; padding: 0 9px; }
+    .statusbar {
+      flex: 0 0 25px; height: 25px; padding: 0 9px; display: grid;
+      grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 7px;
+      font-size: 10px; color: var(--muted); border-top: 1px solid var(--border); background: #fbfcfd;
+    }
+    #portStatus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 4px; vertical-align: middle; }
+    .dot.on { background: var(--ok); box-shadow: 0 0 0 2px rgba(22,163,106,.12); }
+    .dot.off { background: var(--danger); }
+    .empty { margin: 48px auto; padding: 0 20px; text-align: center; color: var(--sub); font-size: 12px; line-height: 1.7; }
+    .toast { position: fixed; left: 50%; bottom: 38px; width: max-content; max-width: calc(100% - 30px); transform: translateX(-50%); background: rgba(17,24,39,.94); color: #fff; padding: 9px 13px; border-radius: 9px; font-size: 12px; line-height: 1.45; text-align: center; display: none; z-index: 20; box-shadow: 0 7px 20px rgba(0,0,0,.16); }
+    body.collapsed .shell { display: none; }
+    body.collapsed .strip { display: flex; }
+    .strip { display: none; position: fixed; inset: 0; width: 100%; height: 100%; background: var(--brand); color: #fff; writing-mode: vertical-rl; align-items: center; justify-content: center; font-size: 13px; letter-spacing: 4px; cursor: pointer; border-radius: 8px 0 0 8px; }
+    .strip:hover { background: var(--brand-hover); }
+    body.dock .shell { border-radius: 0; box-shadow: none; }
+    body.dock .modebar, body.dock .qa-banner { display: none; }
+    body.dock .workbench-tri { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+    body.dock .chat-pane, body.dock .inspector-pane { display: none; }
+    body.dock .list-pane { border-right: 0; }
+    body.dock .titlebar { flex-basis: 38px; height: 38px; }
+    body.dock .titlebar .left { font-size: 12px; }
+    body.dock .titlebar .logo { width: 18px; height: 18px; }
+    body.dock #btnMin { display: none; }
+    body.dock .list-toolbar { padding: 6px 7px 7px; }
+    body.dock .toolbar-row + .toolbar-row { margin-top: 5px; }
+    body.dock .tab { min-width: 40px; height: 27px; padding: 0 6px; font-size: 11px; }
+    body.dock .search { height: 30px; }
+    body.dock .sess { grid-template-columns: 32px minmax(0,1fr) auto; gap: 8px; margin: 0 5px 4px; padding: 8px; border-radius: 8px; }
+    body.dock .avatar { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
+    body.dock .sess .name-row { margin-bottom: 3px; }
+    body.dock .sess .name { font-size: 12px; }
+    body.dock .preview { font-size: 11px; }
+    body.dock .time { margin: 1px 0 4px; }
+    @media (max-width: 1100px) {
+      .workbench-tri { grid-template-columns: minmax(200px, 240px) minmax(280px, 1fr) minmax(260px, 0.9fr); }
+    }
+    @media (max-width: 860px) {
+      .workbench-tri {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(220px, 36%) minmax(240px, 38%) minmax(160px, 26%);
+      }
+      .list-pane, .chat-pane { border-right: 0; border-bottom: 1px solid var(--border); }
+      .back-btn { display: none; }
+      .inspector-facts { grid-template-columns: 1fr; }
+      .inspector-fact:nth-child(odd) { border-right: 0; }
+    }
+    @media (max-width: 370px) {
+      .chat-head-actions .btn { padding: 0 7px; }
+      .bubble.assistant_simulated { width: 100%; max-width: 100%; }
+      .correction-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="strip" id="strip">聚合接待</div>
+  <div class="shell" id="shell">
+    <div class="titlebar" id="titlebar">
+      <div class="left">
+        <div class="logo">探</div>
+        <span>聚合接待</span>
+        <span style="opacity:.75;font-size:11px" id="titleSub">自建旁路</span>
+      </div>
+      <div class="right">
+        <button class="tbtn" id="btnAdsorb" title="吸附（贴边/贴工作台）" type="button">🧲</button>
+        <button class="tbtn" id="btnPin" title="置顶图钉" type="button">📌</button>
+        <button class="tbtn" id="btnMin" title="折叠为吸附条" type="button">–</button>
+        <button class="tbtn" id="btnClose" title="关闭" type="button">×</button>
+      </div>
+    </div>
+
+    <nav class="modebar" aria-label="&#20027;&#21151;&#33021;&#20999;&#25442;">
+      <div class="mode-tabs">
+        <button class="mode-tab active" data-space="workbench" type="button">&#20250;&#35805;&#24037;&#20316;&#21488;</button>
+        <button class="mode-tab" data-space="capabilities" type="button">&#33021;&#21147;&#20013;&#24515;</button>
+        <a class="capacity-link" href="capacity.html" title="打开容量监控">容量监控</a>
+      </div>
+      <div class="brain-controls">
+        <span class="mode-safety" id="brainSafety">● 探域生产 · 自有大脑影子验证</span>
+        <button class="brain-btn" id="btnBrainTakeover" type="button">开启 AI 回复</button>
+        <button class="brain-btn danger hidden" id="btnBrainSendToggle" type="button">停止全部 AI 回复</button>
+      </div>
+    </nav>
+    <div class="qa-banner" id="qaBanner" role="status">
+      <strong>质检模式</strong>
+      <span>可查看绑定范围内全部会话与客服/AI 回复，不能直接回买家。发现不对请点白盒里的「纠正这条回复」。</span>
+    </div>
+
+    <div class="body" id="body" data-view="workbench" data-space="workbench">
+      <div class="workbench-tri" id="workbenchTri">
+        <!-- 左：会话列表（多店铺/多会话） -->
+        <section class="list-pane" aria-label="会话列表">
+          <div class="col-head">
+            <span>会话</span>
+            <div class="col-head-actions">
+              <span class="sub" id="listCountLabel">0</span>
+              <button class="btn ghost compact" id="btnRefresh" type="button">刷新</button>
+              <button class="btn export compact" id="btnExportAll" type="button">导出</button>
+            </div>
+          </div>
+          <div class="list-toolbar">
+            <div class="toolbar-row">
+              <div class="tabs">
+                <button class="tab active" data-filter="active" type="button">最近</button>
+                <button class="tab" data-filter="handoff" type="button" aria-label="待人工接入">
+                  待人工接入 <span class="tab-badge" id="handoffUnreadBadge" hidden>0</span>
+                </button>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <div class="search-wrap">
+                <span class="search-icon">&#128269;</span>
+                <input class="search" id="search" placeholder="搜索买家、店铺、消息 ID…" />
+              </div>
+              <div class="shop-filter" id="shopFilter" aria-label="店铺筛选" hidden></div>
+            </div>
+          </div>
+          <div class="list" id="sessionList"><div class="empty">等待买家消息…</div></div>
+          <div class="session-pager" id="sessionPager" hidden>
+            <button class="btn ghost compact" id="sessionPrev" type="button">上一页</button>
+            <span id="sessionPageLabel">1 / 1</span>
+            <button class="btn ghost compact" id="sessionNext" type="button">下一页</button>
+          </div>
+        </section>
+
+        <!-- 中：对话详情 -->
+        <section class="chat-pane" aria-label="对话详情">
+          <div class="chat-head">
+            <button class="back-btn" id="btnBack" type="button" title="返回会话列表" style="display:none">&#8249;</button>
+            <div class="chat-identity">
+              <div class="t" id="chatTitle">未选择会话</div>
+              <div class="s" id="chatMeta">在左侧选择买家会话</div>
+            </div>
+            <div class="chat-head-actions">
+              <button class="btn export compact" id="btnExportSession" type="button" disabled>导出</button>
+              <button class="btn ghost compact" id="btnOpenWorkbench" type="button" disabled>工作台</button>
+            </div>
+          </div>
+          <div class="chat-workspace">
+            <section class="conversation-panel" aria-label="对话记录">
+              <div class="messages" id="messages"><div class="empty">从左侧选择会话后，消息会显示在这里</div></div>
+              <div class="composer">
+                <div class="composer-note"><span class="safe-note" id="safeNote">● 观察模式：模拟买家咨询 → 自动跑影子AI（不真实发送）</span><span>Ctrl+Enter</span></div>
+                <div class="composer-quick" id="consultQuick" aria-label="常用咨询">
+                  <button type="button" class="chip" data-consult="这个包邮吗">包邮吗</button>
+                  <button type="button" class="chip" data-consult="续航多久">续航多久</button>
+                  <button type="button" class="chip" data-consult="上不了网怎么办">上不了网</button>
+                  <button type="button" class="chip" data-consult="怎么退货">怎么退货</button>
+                </div>
+                <label class="composer-opt" id="consultEpisodeOpt">
+                  <input type="checkbox" id="consultContinue" />
+                  接着上文（不新开咨询段；默认按新咨询，不继承昨天的商品/对话）
+                </label>
+                <div class="manual-send-control" id="manualSendControl">
+                  <label title="只控制当前店铺的人工直接回复，不等于开启我的大脑自动发送">
+                    <input type="checkbox" id="manualSendToggle" disabled />
+                    <span>人工直发（当前店铺）</span>
+                  </label>
+                  <span class="manual-send-state" id="manualSendState">选择会话后可设置 · 默认关闭</span>
+                </div>
+                <div class="composer-main">
+                  <textarea id="replyText" placeholder="输入买家会问的话，例如：这个包邮吗 / 能连网吗" disabled></textarea>
+                  <div class="actions">
+                    <button class="btn primary" id="btnSend" type="button" disabled>模拟咨询</button>
+                    <button class="btn ghost" id="btnQuick" type="button" disabled title="需先开启当前店铺的人工直发开关">直接回复</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <!-- 右：白盒 -->
+        <aside class="inspector-pane inspector-panel" aria-label="白盒详情">
+          <div class="inspector-head">
+            <div class="inspector-head-main">
+              <div class="t" id="inspectorTitle">白盒详情</div>
+              <div class="s" id="inspectorSubtitle">点击中间消息查看推理过程</div>
+            </div>
+            <span class="inspector-badge" id="inspectorBadge">未选择</span>
+          </div>
+          <div class="inspector-content" id="inspectorContent">
+            <div class="inspector-empty">左侧选会话，中间点消息，右侧显示白盒链路（路由 / 商品 / 话术 / 决策）。</div>
+          </div>
+        </aside>
+      </div>
+
+      <section class="capability-pane" id="capabilityPane" aria-label="&#33021;&#21147;&#20013;&#24515;">
+        <header class="cap-head">
+          <div class="cap-title">
+            <strong id="capTitle">&#35805;&#26415;&#24211;</strong>
+            <span id="capSubtitle">&#22266;&#23450;&#38382;&#27861;&#12289;&#21487;&#20449;&#22238;&#22797;&#21644;&#30452;&#25509;&#21629;&#20013;&#31574;&#30053;</span>
+          </div>
+          <div class="cap-head-actions">
+            <label class="cap-shop-switch" for="capShopSelect">
+              <span>&#24403;&#21069;&#24215;&#38138;</span>
+              <select id="capShopSelect" aria-label="&#20999;&#25442;&#33021;&#21147;&#20013;&#24515;&#24215;&#38138;">
+                <option value="">&#27491;&#22312;&#35782;&#21035;&#24215;&#38138;&#8230;</option>
+              </select>
+            </label>
+            <button class="cap-btn" id="capManageShops" type="button">&#31649;&#29702;&#24215;&#38138;</button>
+            <button class="cap-btn" id="capRefreshModule" type="button">&#21047;&#26032;</button>
+          </div>
+        </header>
+        <div class="cap-layout">
+          <nav class="cap-nav" aria-label="&#33021;&#21147;&#27169;&#22359;">
+            <div class="cap-nav-title">&#33021;&#21147;&#31649;&#29702;</div>
+            <button class="cap-nav-btn" data-cap-module="messages" type="button"><span class="cap-nav-icon">&#9993;</span>全部消息</button>
+            <button class="cap-nav-btn" data-cap-module="growth" type="button"><span class="cap-nav-icon">&#8635;</span>成长中心</button>
+            <button class="cap-nav-btn active" data-cap-module="scripts" type="button"><span class="cap-nav-icon">&#9636;</span>&#35805;&#26415;&#24211;</button>
+            <button class="cap-nav-btn" data-cap-module="knowledge" type="button"><span class="cap-nav-icon">&#9635;</span>&#30693;&#35782;&#24211;</button>
+            <button class="cap-nav-btn" data-cap-module="models" type="button"><span class="cap-nav-icon">&#9672;</span>&#27169;&#22411;&#37197;&#32622;</button>
+            <button class="cap-nav-btn" data-cap-module="prompts" type="button"><span class="cap-nav-icon">&#182;</span>&#25552;&#31034;&#35789;</button>
+            <button class="cap-nav-btn" data-cap-module="routing" type="button"><span class="cap-nav-icon">&#8644;</span>&#25509;&#24453;&#20998;&#24037;</button>
+            <button class="cap-nav-btn" data-cap-module="payment_reminder" type="button"><span class="cap-nav-icon">&#9201;</span>&#20652;&#20184;&#35774;&#32622;</button>
+            <button class="cap-nav-btn" data-cap-module="force_handoff" type="button"><span class="cap-nav-icon">&#128101;</span>&#24378;&#21046;&#36716;&#20154;&#24037;</button>
+            <button class="cap-nav-btn" data-cap-module="workflows" type="button"><span class="cap-nav-icon">&#8674;</span>&#21806;&#21518;&#35268;&#21017;</button>
+            <button class="cap-nav-btn" data-cap-module="import" type="button"><span class="cap-nav-icon">&#8681;</span>&#32842;&#22825;&#23548;&#20837;</button>
+            <button class="cap-nav-btn" data-cap-module="corrections" type="button"><span class="cap-nav-icon">&#10003;</span>&#32416;&#27491;&#35760;&#24405;</button>
+            <button class="cap-nav-btn" data-cap-module="users" type="button"><span class="cap-nav-icon">&#128100;</span>&#29992;&#25143;&#26435;&#38480;</button>
+            <button class="cap-nav-btn" data-cap-module="tokens" type="button"><span class="cap-nav-icon">&#128273;</span>&#20196;&#29260;&#31649;&#29702;</button>
+          </nav>
+          <main class="cap-content" id="capContent">
+            <div class="cap-loading">&#27491;&#22312;&#21152;&#36733;&#8230;</div>
+          </main>
+        </div>
+        <div class="cap-modal" id="capModal" role="dialog" aria-modal="true" aria-labelledby="capDialogTitle">
+          <div class="cap-dialog">
+            <div class="cap-dialog-head"><strong id="capDialogTitle">&#32534;&#36753;</strong><button class="cap-dialog-close" data-cap-close type="button">&times;</button></div>
+            <div class="cap-dialog-body" id="capDialogBody"></div>
+            <div class="cap-dialog-foot" id="capDialogFoot"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="statusbar">
+      <span id="watchStatus"><span class="dot off"></span>监听中</span>
+      <span id="portStatus">DLL -</span>
+      <span id="sessCount">0 会话</span>
+      <span id="authUserLabel" style="margin-left:auto;color:var(--muted);font-size:11px"></span>
+      <button class="btn ghost compact" id="btnAuthLogout" type="button" style="display:none;margin-left:8px">退出</button>
+    </div>
+  </div>
+  <div class="auth-overlay" id="authOverlay" hidden>
+    <div class="auth-card">
+      <h1>登录接待台</h1>
+      <p class="auth-sub">按角色进入：店长改配置 · 班长带队 · 一线只做会话</p>
+      <label>用户名<input class="auth-input" id="authUsername" autocomplete="username" placeholder="admin" /></label>
+      <label>密码<input class="auth-input" id="authPassword" type="password" autocomplete="current-password" placeholder="密码" /></label>
+      <button class="auth-btn" id="authLoginBtn" type="button">登录</button>
+      <div class="auth-hint" id="authHint"></div>
+      <div class="auth-roles">
+        <div><b>店长</b>工作台+能力中心+用户</div>
+        <div><b>班长</b>工作台+能力只读/纠正</div>
+        <div><b>一线</b>仅会话：看+回</div>
+        <div><b>质检</b>看全部会话（不回复）+纠错</div>
+        <div><b>只读</b>可看不可回、不纠错</div>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <style>
+    .auth-overlay[hidden]{display:none!important}
+    .auth-overlay{position:fixed;inset:0;z-index:2000;display:grid;place-items:center;background:rgba(15,23,42,.45);backdrop-filter:blur(4px)}
+    .auth-card{width:min(400px,92vw);padding:22px 22px 18px;border-radius:14px;background:#fff;border:1px solid #dbe3f0;box-shadow:0 18px 50px rgba(15,23,42,.22)}
+    .auth-card h1{margin:0;font-size:18px;color:#172033}
+    .auth-sub{margin:8px 0 14px;color:#64748b;font-size:12px;line-height:1.5}
+    .auth-card label{display:grid;gap:5px;margin-bottom:10px;color:#475467;font-size:11px;font-weight:650}
+    .auth-input{height:36px;padding:0 10px;border:1px solid #d0d7e2;border-radius:8px;font-size:13px}
+    .auth-btn{width:100%;height:38px;margin-top:4px;border:0;border-radius:9px;background:var(--brand);color:#fff;font-weight:700;cursor:pointer}
+    .auth-btn:hover{background:var(--brand-hover)}
+    .auth-hint{margin-top:10px;color:#9a4e00;font-size:11px;line-height:1.45;min-height:16px}
+    .auth-roles{margin-top:12px;display:grid;gap:4px;padding-top:10px;border-top:1px dashed #e5eaf1;color:#667085;font-size:10px;line-height:1.45}
+    .auth-roles b{color:#344054;margin-right:4px}
+    .mode-tab[disabled],.mode-tab.is-locked{opacity:.45;cursor:not-allowed}
+    body.auth-locked .shell{filter:grayscale(.05);pointer-events:none}
+    .qa-banner{
+      display:none; flex:0 0 auto; align-items:center; gap:8px; flex-wrap:wrap;
+      padding:6px 12px; background:linear-gradient(90deg,#fff7ed,#fffbeb);
+      border-bottom:1px solid #f0d9a8; color:#9a4e00; font-size:11px; line-height:1.45;
+    }
+    body.qa-mode .qa-banner{display:flex}
+    body.qa-mode .composer, body.qa-mode #replyText, body.qa-mode #btnSend,
+    body.qa-mode #btnSimSend, body.qa-mode .manual-send-bar{opacity:.55}
+    .qa-banner strong{color:#7c3d00}
+    .session-pager{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:8px;padding:7px;border-top:1px solid var(--border);background:#fff;color:var(--muted);font-size:10px}
+    .session-pager[hidden]{display:none}
+    .load-older-wrap{display:flex;justify-content:center;padding:8px 0 12px}
+  </style>
+
+  <script>
+    const DOCK_MODE = new URLSearchParams(location.search).get('dock') === '1';
+    if (DOCK_MODE) document.body.classList.add('dock');
+    let shopFilterId = '';
+    let shopNameMap = {};
+    let currentBuyer = null;
+    let currentAccount = null;
+    let sessionsCache = [];
+    let filterMode = 'active';
+    let sessionPage = 1;
+    let sessionPages = 1;
+    let sessionTotal = 0;
+    let sessionCounts = { active:0, handoff:0, all:0 };
+    let sessionShopCounts = {};
+    let sessionSearchTimer = null;
+    let currentLoadedMessages = [];
+    let currentMessageTotal = 0;
+    let currentMaxSequence = 0;
+    let currentHasMoreMessages = false;
+    let currentNextBefore = null;
+    let desktop = !!(window.pywebview);
+    let pinOn = true;
+    let adsorbOn = true;
+    let sendMode = 'observe';
+    let brainMode = 'tanyu_shadow';
+    let ownAutoSendEnabled = false;
+    let currentSessionSignature = '';
+    let sessionRequestSerial = 0;
+    let backgroundSessionRefreshRunning = false;
+    let backgroundSessionRefreshQueued = false;
+    let backgroundSessionRefreshForce = false;
+    let tickRunning = false;
+    let lastStatusRefreshAt = 0;
+    let lastSessionListRefreshAt = 0;
+    let lastCurrentSessionRefreshAt = 0;
+    const TICK_INTERVAL_MS = 2000;
+    const SESSION_LIST_REFRESH_INTERVAL_MS = 5000;
+    const CURRENT_SESSION_REFRESH_INTERVAL_MS = 2000;
+    const STATUS_REFRESH_INTERVAL_MS = 15000;
+    const SESSION_INITIAL_MESSAGE_LIMIT = 50;
+    const SESSION_DELTA_OVERLAP = 40;
+    const messageDetailRequests = new Map();
+    let currentListSignature = '';
+    let exportBusy = false;
+    let selectedMessageId = '';
+    let currentMessageEntries = [];
+    let currentShadowByParent = new Map();
+    let currentQuestionRefById = new Map();
+    let shopBrainStates = [];
+    let manualSendBusy = false;
+    let replyBusy = false;
+    let intentCatalogByCode = {};
+    function setIntentCatalog(rows) {
+      const catalog = Array.isArray(rows) ? rows.filter(row => row && row.code) : [];
+      intentCatalogByCode = Object.fromEntries(catalog.map(row => [String(row.code), row]));
+      window.__INTENT_CATALOG__ = catalog;
+    }
+    // Integrated (Jinja) defaults; separate frontend overrides via web/config.js + /api/runtime-config
+    const __TPL = {
+      rbac_enabled: true,
+      bootstrap_hint: null,
+      api_base: ""
+    };
+    window.__KEFU_CONFIG__ = Object.assign({
+      apiBase: __TPL.api_base || '',
+      rbacEnabled: __TPL.rbac_enabled,
+      bootstrapHint: __TPL.bootstrap_hint
+    }, window.__KEFU_CONFIG__ || {});
+
+    let RBAC_ENABLED = window.__KEFU_CONFIG__.rbacEnabled !== false;
+    let SEAT_MODE = false;
+    let BOOTSTRAP_HINT = window.__KEFU_CONFIG__.bootstrapHint || null;
+    // When the workbench is opened on Windows loopback, API traffic must stay on
+    // the local seat gateway. Ignore stale split-deployment overrides that may
+    // still point the browser directly at the Mac brain.
+    const LOOPBACK_SEAT = ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
+    const CONFIGURED_API_BASE = String(window.__KEFU_CONFIG__.apiBase || '').replace(/\/$/, '');
+    let API_BASE = LOOPBACK_SEAT
+      ? ''
+      : CONFIGURED_API_BASE;
+    let authUser = null;
+    let authReady = !RBAC_ENABLED;
+    let runtimeReady = false;
+    let CAPABILITIES_ENABLED = true;
+
+    const $ = (id) => document.getElementById(id);
+    function apiUrl(path){
+      const p = path.startsWith('/') ? path : ('/' + path);
+      return (API_BASE || '') + p;
+    }
+    function authToken(){ return sessionStorage.getItem('rbacUserToken') || ''; }
+    function setAuthToken(token){
+      if(token) sessionStorage.setItem('rbacUserToken', token);
+      else sessionStorage.removeItem('rbacUserToken');
+    }
+    function hasPerm(perm){
+      if(!RBAC_ENABLED) return true;
+      if(!authUser) return false;
+      if(authUser.role === 'owner' || authUser.system) return true;
+      return (authUser.perms || []).includes(perm);
+    }
+    function applyAuthUi(){
+      const label = $('authUserLabel');
+      const logoutBtn = $('btnAuthLogout');
+      const isQa = !!(authUser && authUser.role === 'qa');
+      if(authUser){
+        label.textContent = `${authUser.display_name || authUser.username} · ${authUser.role_label || authUser.role}`;
+        logoutBtn.style.display = SEAT_MODE ? 'none' : '';
+      }else{
+        label.textContent = RBAC_ENABLED ? '未登录' : '本地模式';
+        logoutBtn.style.display = 'none';
+      }
+      document.body.classList.toggle('qa-mode', isQa);
+      const capTab = document.querySelector('.mode-tab[data-space="capabilities"]');
+      if(capTab){
+        // 质检可进能力中心（主要看纠正记录）；一线默认不可
+        const ok = CAPABILITIES_ENABLED && hasPerm('capabilities.view');
+        capTab.disabled = !ok;
+        capTab.classList.toggle('is-locked', !ok);
+        capTab.title = ok ? '能力中心' : '当前角色不能进入能力中心';
+      }
+      const replyBox = $('replyText');
+      const canReply = hasPerm('workbench.reply');
+      if(replyBox){
+        if(!replyBox.getAttribute('data-ph')) replyBox.setAttribute('data-ph', replyBox.placeholder || '');
+        replyBox.disabled = !canReply;
+        replyBox.placeholder = canReply
+          ? replyBox.getAttribute('data-ph')
+          : (isQa ? '质检模式：不能回复买家，请使用白盒「纠正这条回复」' : '当前角色只读，不能回复');
+      }
+      document.querySelectorAll('#btnSend, #btnSimSend, [data-need-reply]').forEach(el=>{
+        if(el) el.disabled = !canReply;
+      });
+      const exportBtn = $('btnExportAll');
+      if(exportBtn) exportBtn.disabled = !hasPerm('workbench.export');
+      window.__AUTH__ = {
+        user: authUser,
+        rbac: RBAC_ENABLED,
+        hasPerm,
+        qaMode: isQa,
+        canCorrect: hasPerm('capabilities.corrections'),
+      };
+      document.dispatchEvent(new CustomEvent('auth-changed', { detail: window.__AUTH__ }));
+    }
+    function showLogin(message){
+      authReady = false;
+      document.body.classList.add('auth-locked');
+      const overlay = $('authOverlay');
+      if(overlay) overlay.hidden = false;
+      if(message) $('authHint').textContent = message;
+      else if(BOOTSTRAP_HINT && BOOTSTRAP_HINT.created){
+        $('authHint').textContent = `首次使用默认店长：${BOOTSTRAP_HINT.username} / ${BOOTSTRAP_HINT.password}（登录后请改密）`;
+      }else{
+        $('authHint').textContent = '';
+      }
+    }
+    function hideLogin(){
+      authReady = true;
+      document.body.classList.remove('auth-locked');
+      const overlay = $('authOverlay');
+      if(overlay) overlay.hidden = true;
+    }
+    async function loadRuntimeConfig(){
+      // Explicit deployment config wins. Otherwise probe same-origin before a
+      // legacy browser override so opening the brain URL cannot silently use a
+      // local seat gateway left in localStorage.
+      const stored = LOOPBACK_SEAT ? '' : localStorage.getItem('kefuApiBase');
+      const candidates = [];
+      const addRuntimeCandidate = value => {
+        const base = String(value || '').replace(/\/$/, '');
+        if(!candidates.includes(base)) candidates.push(base);
+      };
+      if(LOOPBACK_SEAT){
+        addRuntimeCandidate('');
+      }else{
+        if(CONFIGURED_API_BASE) addRuntimeCandidate(CONFIGURED_API_BASE);
+        addRuntimeCandidate('');
+        if(stored) addRuntimeCandidate(stored);
+      }
+      let runtimeLoaded = false;
+      let runtimeError = null;
+      for(const candidate of candidates){
+        try{
+          const r = await fetch(`${candidate}/api/runtime-config`, { cache: 'no-store' });
+          const j = await r.json().catch(()=>({}));
+          if(!r.ok || !j || j.ok === false) continue;
+          API_BASE = candidate;
+          if(j.api_base != null && j.api_base !== ''){
+            API_BASE = String(j.api_base).replace(/\/$/, '');
+          }
+          if(typeof j.rbac_enabled === 'boolean') RBAC_ENABLED = j.rbac_enabled;
+          SEAT_MODE = j.seat_mode === true;
+          setIntentCatalog(j.intent_catalog);
+          if(candidate === '' && !SEAT_MODE && stored){
+            localStorage.removeItem('kefuApiBase');
+          }
+          window.__KEFU_CONFIG__ = Object.assign({}, window.__KEFU_CONFIG__ || {}, {
+            apiBase: API_BASE,
+            capabilities_enabled: typeof j.capabilities_enabled === 'boolean' ? j.capabilities_enabled : true,
+            rbacEnabled: RBAC_ENABLED,
+            bootstrapHint: BOOTSTRAP_HINT
+          });
+          runtimeLoaded = true;
+          break;
+        }catch(e){
+          runtimeError = e;
+        }
+      }
+      if(!runtimeLoaded){
+        API_BASE = LOOPBACK_SEAT ? '' : (CONFIGURED_API_BASE || String(stored || '').replace(/\/$/, ''));
+        if(runtimeError) console.warn('runtime-config', runtimeError);
+      }
+      runtimeReady = true;
+    }
+    async function ensureAuth(){
+      if(!runtimeReady) await loadRuntimeConfig();
+      if(SEAT_MODE){
+        try{
+          const r = await fetch(apiUrl('/api/auth/me'), { cache: 'no-store' });
+          const j = await r.json().catch(()=>({}));
+          if(!r.ok || !j.user){
+            authUser = null;
+            showLogin(j.error_user || j.error || '本机工位身份校验失败，请检查桥接助手配置');
+            applyAuthUi();
+            return false;
+          }
+          setAuthToken('');
+          authUser = j.user;
+          applyAuthUi();
+          hideLogin();
+          return true;
+        }catch(e){
+          authUser = null;
+          showLogin('无法校验本机工位身份，请确认桥接助手与本地服务已启动');
+          applyAuthUi();
+          return false;
+        }
+      }
+      if(!RBAC_ENABLED){
+        authUser = { username:'local', display_name:'本地', role:'local', role_label:'本地模式', perms:[], system:false };
+        applyAuthUi();
+        hideLogin();
+        return true;
+      }
+      const token = authToken();
+      if(!token){
+        showLogin();
+        applyAuthUi();
+        return false;
+      }
+      try{
+        const r = await fetch(apiUrl('/api/auth/me'), { headers: { 'X-User-Token': token } });
+        const j = await r.json().catch(()=>({}));
+        if(!r.ok || !j.user){
+          setAuthToken('');
+          showLogin(j.error || '登录已失效，请重新登录');
+          authUser = null;
+          applyAuthUi();
+          return false;
+        }
+        authUser = j.user;
+        applyAuthUi();
+        hideLogin();
+        return true;
+      }catch(e){
+        showLogin('无法连接后端 API（请检查 web/config.js 的 apiBase 或服务是否启动）');
+        return false;
+      }
+    }
+    async function doLogin(){
+      const username = ($('authUsername').value || '').trim();
+      const password = $('authPassword').value || '';
+      if(!username || !password){
+        $('authHint').textContent = '请输入用户名和密码';
+        return;
+      }
+      $('authLoginBtn').disabled = true;
+      try{
+        const r = await fetch(apiUrl('/api/auth/login'), {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const j = await r.json().catch(()=>({}));
+        if(!r.ok){
+          $('authHint').textContent = j.error || '登录失败';
+          return;
+        }
+        setAuthToken(j.token || '');
+        authUser = j.user;
+        applyAuthUi();
+        hideLogin();
+        if(j.user && j.user.must_change_password){
+          toast('请尽快修改默认密码（能力中心 → 用户权限）');
+        }
+        tick();
+      }catch(e){
+        $('authHint').textContent = e.message || '登录失败（无法连接 API）';
+      }finally{
+        $('authLoginBtn').disabled = false;
+      }
+    }
+    async function doLogout(){
+      try{
+        await fetch(apiUrl('/api/auth/logout'), {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json', 'X-User-Token': authToken() },
+          body: '{}'
+        });
+      }catch(_){}
+      setAuthToken('');
+      authUser = null;
+      applyAuthUi();
+      showLogin('已退出');
+    }
+
+    function toast(msg) {
+      const el = $('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
+      setTimeout(() => el.style.display = 'none', 2200);
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => (
+        { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]
+      ));
+    }
+
+    function safeHttpUrl(value) {
+      const raw = String(value || '').trim();
+      if (!/^https?:\/\//i.test(raw)) return '';
+      try {
+        const parsed = new URL(raw);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function debugDetails(title, content, open = false, key = '') {
+      if (content === undefined || content === null || content === '' || (Array.isArray(content) && !content.length)) return '';
+      const value = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+      const keyAttr = key ? ` data-detail-key="${escapeHtml(key)}"` : '';
+      return `<details${keyAttr}${open ? ' open' : ''}><summary>${escapeHtml(title)}</summary><pre>${escapeHtml(value)}</pre></details>`;
+    }
+
+    function plainText(value, fallback = '-') {
+      if (value === undefined || value === null || value === '') return fallback;
+      if (typeof value === 'object') {
+        try { return JSON.stringify(value); } catch (_) { return fallback; }
+      }
+      return String(value);
+    }
+
+    function humanPath(path, pipeline) {
+      const p = String(path || pipeline || '');
+      const map = {
+        product_clarify: '先引导补充商品信息',
+        local_script_direct: '标准话术直发',
+        local_script_static_package_catalog: '套餐价表直发（不查卡）',
+        local_script_status_independent: '静态话术直发（不查卡）',
+        local_script_recharge_howto: '充值步骤话术直发',
+        local_script_activation_howto: '激活/实名步骤话术直发',
+        greeting_open: '寒暄开场，引导说出诉求',
+        embedded_llm: '大模型组织回复',
+        llm_with_knowledge_sop: '知识+流程后由 AI 组织回复',
+        logistics_no_order_safe_clarify: '无订单物流安全澄清',
+        tool_guard_order_status_unknown: '查卡失败后的安全引导',
+        tool_guard_status_temporarily_unknown: '状态暂不可用安全引导',
+        tool_guard_missing_card_id: '缺卡号，引导补充 ICCID',
+        activation_howto_safe_guide: '激活流程安全直答',
+        safe_local_fallback: '本地安全兜底（模型失败）',
+        deterministic_diagnosis: '诊断兜底句（应避免对客）',
+        presale_script: '售前话术接待',
+        logistics_support: '物流/运费咨询',
+        package_sales: '套餐推荐',
+        aftersales_diagnosis: '售后诊断',
+        hybrid_fallback: '综合兜底',
+        'aftersales_whitebox+bridge_local': '本地能力 + 白盒模拟',
+        aftersales_whitebox: '售后白盒模拟',
+      };
+      if (map[p]) return map[p];
+      if (p.includes('recharge')) return '充值步骤回复';
+      if (p.includes('activation')) return '激活流程回复';
+      if (p.includes('package') || p.includes('catalog')) return '套餐资料回复';
+      if (p.includes('script')) return '话术匹配回复';
+      if (p.includes('llm') || p.includes('model') || p.includes('embedded')) return '大模型生成回复';
+      if (p.includes('clarify') || p.includes('greeting')) return '澄清/引导';
+      if (p.includes('presale')) return '售前接待';
+      if (p.includes('guard') || p.includes('fallback')) return '安全兜底';
+      return p || '未记录';
+    }
+
+    function humanReplySource(source, path) {
+      const s = String(source || path || '');
+      const map = {
+        local_script_direct: '店铺话术库',
+        local_script_status_independent: '店铺静态话术（套餐/步骤）',
+        local_script_static_package_catalog: '套餐价表话术',
+        local_script_recharge_howto: '充值步骤话术',
+        local_script_activation_howto: '激活步骤话术',
+        history_package_price_confirm: '本段历史价表确认',
+        history_package_catalog_reuse: '复用本段已报价表',
+        builtin_recharge_howto: '内置充值步骤',
+        embedded_llm: '大模型',
+        greeting_open: '寒暄规则',
+        product_clarify: '商品澄清规则',
+        safe_local_fallback: '本地安全兜底',
+        deterministic_diagnosis: '诊断兜底（异常）',
+        tool_guard_order_status_unknown: '查卡失败门控',
+        tool_guard_status_temporarily_unknown: '状态未知门控',
+      };
+      return map[s] || humanPath(s) || '未记录';
+    }
+
+    function humanIntent(intent) {
+      const value = String(intent || '').trim();
+      const label = intentCatalogByCode[value]?.label;
+      if (label) return label;
+      if (!value) return '意图未知';
+      return /[\u3400-\u9fff]/.test(value) ? value : '其他咨询（待分类）';
+    }
+
+    function humanYesNo(v) {
+      if (v === true) return '是';
+      if (v === false) return '否';
+      return '-';
+    }
+
+    function humanSecondaryRealname(v) {
+      if (v === true) return '是';
+      if (v === false) return '否';
+      return '-';
+    }
+
+    function humanCurrentCardReason(reason) {
+      const map = {
+        latest_flow_record: '按最新流量记录确定',
+        has_flow_record: '按流量记录确定',
+        active_with_package: '按正常状态和有效套餐确定',
+        active_card: '按正常卡状态确定',
+        most_complete_status: '按状态完整度确定',
+      };
+      return map[String(reason || '')] || '-';
+    }
+
+    function humanCardStatus(text, code) {
+      const direct = String(text || '').trim();
+      if (direct) return direct;
+      const map = {
+        pending_activation: '待激活',
+        active: '正常/使用中',
+        suspended: '停机/欠费',
+        cancelled: '已注销',
+        disconnected: '已断网',
+        abnormal: '异常',
+        unknown: '状态未知',
+      };
+      return map[String(code || '')] || '-';
+    }
+
+    function humanRealNameStatus(status, message, summary, otherCardVerified) {
+      const resolvedSummary = String(summary || '').trim();
+      if (resolvedSummary) return resolvedSummary;
+      if (otherCardVerified === true) return '另外一个卡已实名';
+      const msg = String(message || '').trim();
+      if (msg) return msg;
+      const map = {
+        verified: '已实名',
+        unverified: '未实名',
+        other_card_verified: '另外一个卡已实名',
+        pending: '实名审核中',
+        failed: '实名失败',
+        unknown: '暂无明确实名状态',
+      };
+      return map[String(status || '')] || '-';
+    }
+
+    function formatFlowValue(gb, mb) {
+      if (gb !== undefined && gb !== null && gb !== '') return `${plainText(gb)} GB`;
+      if (mb !== undefined && mb !== null && mb !== '') return `${plainText(mb)} MB`;
+      return '';
+    }
+
+    function humanFlowSummary(facts) {
+      const f = facts || {};
+      const remaining = formatFlowValue(f.remainingDataGb, f.remainingFlowMb);
+      const total = formatFlowValue(f.totalDataGb, f.totalFlowMb);
+      if (remaining || total) return `剩余 ${remaining || '-'} / 总量 ${total || '-'}`;
+      if (f.hasFlowRecord === false) return '暂无流量记录';
+      if (f.hasFlowRecord === true) return '已返回流量记录（未含额度）';
+      return '-';
+    }
+
+    function humanRssiSummary(facts) {
+      const f = facts || {};
+      const direct = String(f.signalDescription || f.signal_description || '').trim();
+      if (direct) return direct;
+      const raw = f.rssi;
+      if (raw === undefined || raw === null || raw === '') return '-';
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value >= 0) return '-';
+      const quality = String(f.signalQuality || f.signal_quality || (
+        value >= -65 ? '优秀' : value >= -75 ? '良好' : value >= -85 ? '一般' : value >= -95 ? '较弱' : '弱'
+      ));
+      const weak = f.weakSignal === true || f.weak_signal === true || value < -95;
+      return `${value} dBm（${quality}，数值越大信号越好${weak ? '；弱信号可能导致网速慢等情况' : ''}）`;
+    }
+
+    function normalizeOrderCardFacts(raw) {
+      if (!raw || typeof raw !== 'object') return null;
+      const signal = raw.signal_strength && typeof raw.signal_strength === 'object' ? raw.signal_strength : {};
+      return {
+        cardId: raw.iccid || raw.card_id || '',
+        operator: raw.operator || raw.operator_name || '',
+        cardStatusText: raw.card_status || raw.card_status_text || raw.account_status_text || '',
+        accountStatus: raw.account_status || '',
+        packageName: raw.package_name || '',
+        realNameStatus: raw.real_name_status || '',
+        realNameMessage: raw.real_name_message || '',
+        realNameSummary: raw.real_name_summary || '',
+        otherCardVerified: raw.other_card_verified === true,
+        secondaryRealname: raw.secondary_realname,
+        secondaryRealnameActionRequired: raw.secondary_realname_action_required,
+        isCurrentCard: raw.is_current_card === true,
+        realnameMonitor: raw.realname_monitor && typeof raw.realname_monitor === 'object' ? raw.realname_monitor : {},
+        hasFlowRecord: raw.has_flow_record,
+        remainingDataGb: raw.remaining_data_gb,
+        totalDataGb: raw.total_data_gb,
+        remainingFlowMb: raw.remaining_flow_mb,
+        totalFlowMb: raw.total_flow_mb,
+        rssi: raw.rssi ?? signal.rssi,
+        signalQuality: raw.signal_quality || '',
+        weakSignal: raw.weak_signal,
+        signalDescription: raw.signal_description || '',
+        flowRecordTime: raw.flow_record_time || '',
+        statusUpdatedAt: raw.status_updated_at || raw.flow_record_time || raw.signal_record_time || signal.record_time || '',
+      };
+    }
+
+    function orderCardFactsList(cardStatus, fallback = null) {
+      const rawCards = cardStatus && Array.isArray(cardStatus.cards) ? cardStatus.cards : [];
+      const cards = rawCards.map(normalizeOrderCardFacts).filter(Boolean);
+      if (cards.length) return cards;
+      return fallback ? [fallback] : [];
+    }
+
+    function humanCardRealNameSummary(card) {
+      const direct = humanRealNameStatus(
+        card?.realNameStatus,
+        card?.realNameMessage,
+        card?.realNameSummary,
+        card?.otherCardVerified,
+      );
+      if (direct !== '-') return direct;
+      const monitor = card?.realnameMonitor || {};
+      const labels = Object.values(monitor).filter(v => v !== null && v !== undefined && v !== '').map(v => {
+        if (v === true || v === 1 || String(v).trim() === '1') return '已实名';
+        if (v === false || v === 0 || String(v).trim() === '0') return '未实名';
+        return String(v).trim();
+      }).filter(Boolean);
+      return [...new Set(labels)].join(' / ') || '-';
+    }
+
+    function multiCardValue(cards, formatter, fallback) {
+      if (!Array.isArray(cards) || cards.length <= 1) return fallback;
+      return cards.map((card, index) => `卡${index + 1}：${formatter(card) || '-'}`).join('\n');
+    }
+
+    function pickPolicy(d) {
+      const bridge = d.bridge || {};
+      const local = d.local_capabilities || {};
+      return bridge.product_policy || local.product_policy || d.product_policy || {};
+    }
+
+    function scriptPlainList(scripts) {
+      if (!Array.isArray(scripts) || !scripts.length) return '未使用标准话术';
+      return scripts.slice(0, 3).map((s, i) => {
+        const title = s.title || s.name || `话术${i + 1}`;
+        const score = s.score != null ? `（匹配度 ${Math.round(Number(s.score) * 100)}%）` : '';
+        const trigger = s.matched_trigger ? `，触发词：${s.matched_trigger}` : '';
+        return `${i + 1}. ${title}${score}${trigger}`;
+      }).join('\n');
+    }
+
+    function toolPlainList(tools) {
+      if (!Array.isArray(tools) || !tools.length) return '未调用外部查询工具';
+      return tools.map((t, i) => {
+        const name = t.name || t.tool || `工具${i + 1}`;
+        const nameMap = { get_card_status: '查询卡/套餐状态', get_device_status: '查询设备状态' };
+        const label = nameMap[name] || name;
+        const ok = t.success === false ? '失败' : '成功';
+        const finding = ((t.findings || [])[0] || {}).title || '';
+        return `${i + 1}. ${label}（${ok}${finding ? '，' + finding : ''}）`;
+      }).join('\n');
+    }
+
+    function renderStorySteps(steps) {
+      return `<ol class="wb-steps">${steps.map((s, i) => `
+        <li class="wb-step">
+          <div class="n">${i + 1}</div>
+          <div class="body"><div class="t">${escapeHtml(s.title)}</div><div class="d">${escapeHtml(s.detail)}</div></div>
+        </li>`).join('')}</ol>`;
+    }
+
+    function buildWhiteboxStory(m) {
+      const d = m.whitebox || {};
+      const bridge = d.bridge || {};
+      const routing = bridge.routing || (d.rule_policy || {}).routing || {};
+      const route = routing.route || {};
+      const policy = pickPolicy(d);
+      const decision = policy.decision || {};
+      const pack = policy.pack || {};
+      const input = d.input_context || {};
+      const classification = d.classification || {};
+      const emotion = d.emotion || classification.emotion || {};
+      const sop = d.sop || {};
+      const finalDecision = d.final_decision || {};
+      const scripts = Array.isArray(d.script_hits) ? d.script_hits : [];
+      const tools = Array.isArray(d.tool_calls) ? d.tool_calls : [];
+      const status = m.shadow_status || '';
+      const timing = shadowTiming(m);
+      const oc = bridge.order_card || input.order_card || {};
+      const mw = bridge.mobile_wifi_tools || input.mobile_wifi_tools || d.mobile_wifi_tools || {};
+      const toolGuard = d.tool_truth_guard || {};
+      const productId = bridge.context_product_id || bridge.product_id || input.product_id
+        || oc.product_id || d.product_id || '';
+      const productFromChat = bridge.product_from_chat || input.product_from_chat || {};
+      const productFromOrder = bridge.product_from_order || input.product_from_order || {};
+      const factsText = String(policy.facts_block || policy.product_context_block || d.compiled_knowledge_context || '');
+      const titleMatch = factsText.match(/标题[：:]\s*(.+)/);
+      const productTitle = String(
+        bridge.product_title || input.product_title || oc.product_title || d.product_title
+        || productFromOrder.title || productFromOrder.goods_name
+        || productFromChat.title || input.item_desc_title || (titleMatch ? titleMatch[1] : '') || ''
+      ).trim().split('\n')[0];
+      const productLabel = productId
+        ? (productTitle ? `${productTitle.slice(0, 28)}${productTitle.length > 28 ? '…' : ''}（${productId}）` : `商品 ${productId}`)
+        : (productTitle ? productTitle.slice(0, 36) : '无');
+
+      const storedOrderId = oc.order_id || bridge.order_id || input.order_id || d.order_id || '';
+      const productSpec = oc.product_spec || bridge.product_spec || input.product_spec || d.product_spec || '';
+      const businessOrderId = pddBusinessOrderFromText(storedOrderId)
+        || pddBusinessOrderFromText(productSpec);
+      const orderId = businessOrderId || storedOrderId;
+      const orderMasked = oc.order_id_masked || bridge.order_id_masked || input.order_id_masked || d.order_id_masked || '';
+      const orderDisplay = orderId || orderMasked || '无';
+      const orderState = resolveOrderState(m, m);
+      const hasOrder = orderState.kind === 'ordered';
+      const cardStatus = input.card_status || {};
+      const cardId = oc.card_id || bridge.card_id || input.card_id || d.card_id
+        || oc.iccid || bridge.iccid || input.iccid || d.iccid
+        || oc.card_id_masked || bridge.card_id_masked || input.card_id_masked
+        || oc.iccid_masked || bridge.iccid_masked || input.iccid_masked || '';
+      const selectedCardFacts = normalizeOrderCardFacts({
+        iccid: cardId,
+        operator: oc.operator || cardStatus.operator || cardStatus.operator_name,
+        card_status_text: oc.card_status_text || cardStatus.card_status_text || cardStatus.account_status_text,
+        account_status: oc.account_status || cardStatus.account_status,
+        package_name: oc.package_name || cardStatus.package_name,
+        real_name_status: oc.real_name_status || cardStatus.real_name_status,
+        real_name_message: oc.real_name_message || cardStatus.real_name_message,
+        real_name_summary: oc.real_name_summary || cardStatus.real_name_summary,
+        other_card_verified: oc.other_card_verified ?? cardStatus.other_card_verified,
+        secondary_realname: oc.secondary_realname ?? cardStatus.secondary_realname,
+        secondary_realname_action_required: oc.secondary_realname_action_required ?? cardStatus.secondary_realname_action_required,
+        is_current_card: true,
+        has_flow_record: oc.has_flow_record ?? cardStatus.has_flow_record,
+        remaining_data_gb: oc.remaining_data_gb ?? cardStatus.remaining_data_gb,
+        total_data_gb: oc.total_data_gb ?? cardStatus.total_data_gb,
+        remaining_flow_mb: oc.remaining_flow_mb ?? cardStatus.remaining_flow_mb,
+        total_flow_mb: oc.total_flow_mb ?? cardStatus.total_flow_mb,
+        rssi: oc.rssi ?? cardStatus.rssi,
+        signal_quality: oc.signal_quality || cardStatus.signal_quality,
+        weak_signal: oc.weak_signal ?? cardStatus.weak_signal,
+        signal_description: oc.signal_description || cardStatus.signal_description,
+        flow_record_time: oc.flow_record_time || cardStatus.flow_record_time,
+        status_updated_at: oc.status_updated_at || cardStatus.status_updated_at,
+      });
+      const displayCards = orderCardFactsList(cardStatus, selectedCardFacts);
+      const cardDisplay = multiCardValue(
+        displayCards,
+        card => `${card.cardId || '-'}${card.isCurrentCard ? '（当前使用卡）' : '（非当前卡）'}`,
+        cardId || '无',
+      );
+      const equipmentDisplay = oc.equipment_no || bridge.equipment_no
+        || input.equipment_no || cardStatus.equipment_no
+        || oc.equipment_no_masked || bridge.equipment_no_masked
+        || input.equipment_no_masked || '无';
+      const selectedOperatorDisplay = oc.operator || cardStatus.operator || cardStatus.operator_name || '-';
+      const operatorDisplay = multiCardValue(displayCards, card => card.operator, selectedOperatorDisplay);
+      const selectedCardStatusDisplay = humanCardStatus(
+        oc.card_status_text || cardStatus.card_status_text || cardStatus.account_status_text,
+        oc.account_status || cardStatus.account_status,
+      );
+      const cardStatusDisplay = multiCardValue(
+        displayCards,
+        card => humanCardStatus(card.cardStatusText, card.accountStatus),
+        selectedCardStatusDisplay,
+      );
+      const selectedRealNameDisplay = humanRealNameStatus(
+        oc.real_name_status || cardStatus.real_name_status,
+        oc.real_name_message || cardStatus.real_name_message,
+        oc.real_name_summary || cardStatus.real_name_summary,
+        oc.other_card_verified ?? cardStatus.other_card_verified,
+      );
+      const realNameDisplay = multiCardValue(displayCards, humanCardRealNameSummary, selectedRealNameDisplay);
+      const selectedSecondaryRealnameDisplay = humanSecondaryRealname(
+        oc.secondary_realname ?? cardStatus.secondary_realname,
+      );
+      const secondaryRealnameDisplay = multiCardValue(
+        displayCards,
+        card => `${humanSecondaryRealname(card.secondaryRealname)}${card.isCurrentCard ? '（当前使用卡）' : '（非当前卡）'}`,
+        selectedSecondaryRealnameDisplay,
+      );
+      const secondaryRealnameActionRequired = oc.secondary_realname_action_required
+        ?? cardStatus.secondary_realname_action_required;
+      const secondaryRealnameActionDisplay = secondaryRealnameActionRequired === true
+        ? '当前使用卡需引导'
+        : (secondaryRealnameActionRequired === false ? '当前使用卡无需引导' : '-');
+      const currentCardReasonDisplay = humanCurrentCardReason(
+        oc.current_card_selection_reason || cardStatus.current_card_selection_reason,
+      );
+      const selectedPackageDisplay = oc.package_name || cardStatus.package_name || '-';
+      const packageDisplay = multiCardValue(displayCards, card => card.packageName, selectedPackageDisplay);
+      const selectedFlowDisplay = humanFlowSummary({
+        remainingDataGb: oc.remaining_data_gb ?? cardStatus.remaining_data_gb,
+        totalDataGb: oc.total_data_gb ?? cardStatus.total_data_gb,
+        remainingFlowMb: oc.remaining_flow_mb ?? cardStatus.remaining_flow_mb,
+        totalFlowMb: oc.total_flow_mb ?? cardStatus.total_flow_mb,
+        hasFlowRecord: oc.has_flow_record ?? cardStatus.has_flow_record,
+      });
+      const flowDisplay = multiCardValue(displayCards, humanFlowSummary, selectedFlowDisplay);
+      const selectedSignalDisplay = humanRssiSummary({
+        rssi: oc.rssi ?? cardStatus.rssi,
+        signalQuality: oc.signal_quality || cardStatus.signal_quality,
+        weakSignal: oc.weak_signal ?? cardStatus.weak_signal,
+        signalDescription: oc.signal_description || cardStatus.signal_description,
+      });
+      const signalDisplay = multiCardValue(displayCards, humanRssiSummary, selectedSignalDisplay);
+      const selectedStatusUpdatedAt = oc.status_updated_at || cardStatus.status_updated_at
+        || oc.flow_record_time || cardStatus.flow_record_time || '-';
+      const statusUpdatedAt = multiCardValue(
+        displayCards,
+        card => card.statusUpdatedAt || card.flowRecordTime,
+        selectedStatusUpdatedAt,
+      );
+
+      const statusText = status === 'succeeded' ? '模拟成功'
+        : status === 'failed' ? '模拟失败'
+        : status === 'running' ? '正在生成'
+        : '已生成';
+
+      const pathLabel = humanPath(d.path, bridge.pipeline);
+      const sourceLabel = humanReplySource(finalDecision.reply_source || d.path, d.path);
+      const intentLabel = d.intent_label || routing.intent?.label || classification.intent_label
+        || humanIntent(d.intent || routing.intent?.intent || classification.reply_intent);
+      const issueLabel = classification.issue_type || route.target_label || intentLabel;
+      const routeLabel = route.rule_name || route.target_label || '默认接待';
+      const llmOk = !!d.llm_called && !(finalDecision.model_error);
+      const modelErr = String(finalDecision.model_error || '').trim();
+      const skipTool = toolGuard.query_skipped || toolGuard.status_not_required || mw.query_skipped
+        || String(mw.skip_reason || toolGuard.reason || '').includes('no_live')
+        || String(mw.skip_reason || '').includes('static_')
+        || String(mw.skip_reason || '') === 'no_order_context'
+        || String(mw.skip_reason || '') === 'greeting_no_tools';
+      const toolSkipReason = mw.skip_reason || toolGuard.reason || '';
+      const toolSkipMap = {
+        static_package_catalog_no_live_status_needed: '套餐价表不需要查卡',
+        static_recharge_howto_no_live_status_needed: '充值步骤不需要查卡',
+        static_activation_howto_no_live_status_needed: '激活步骤不需要查卡',
+        greeting_no_tools: '寒暄开场不查工具',
+        no_order_context: '本轮无订单，未查卡',
+        product_policy_disallows_tools: '当前品类不允许查卡工具',
+      };
+      const toolSkipText = toolSkipMap[toolSkipReason] || (toolSkipReason ? `跳过：${toolSkipReason}` : '');
+
+      // One-line verdict operators can scan in 2 seconds.
+      const whyBits = [];
+      whyBits.push(orderState.label);
+      if (productId || productTitle) whyBits.push('有商品');
+      else whyBits.push('无商品');
+      if (scripts.length) whyBits.push('用了话术');
+      else whyBits.push('未用话术');
+      if (llmOk) whyBits.push('用了AI');
+      else if (d.llm_called && modelErr) whyBits.push('AI失败');
+      else whyBits.push('未调AI');
+      const summary = `${statusText} · ${pathLabel} · ${whyBits.join(' · ')}`;
+
+      const episode = input.episode || bridge.episode || {};
+      const episodeReasons = Array.isArray(episode.reasons) ? episode.reasons : [];
+      const reasonMap = {
+        time_gap: '间隔超1天，新开一段',
+        product_card: '本段出现新商品卡',
+        episode_break: '显式新开咨询',
+        session_head: '会话连续段',
+      };
+      const reasonText = episodeReasons.map(r => reasonMap[r] || r).join('；') || (input.episode_label || episode.label || '未标注');
+      const histCount = input.history_count != null ? input.history_count : (d.history_count != null ? d.history_count : '-');
+      const productSourceRaw = bridge.product_source || input.product_source || oc.product_source
+        || productFromOrder.source || productFromChat.source || '';
+      const productSourceLabel = productSourceRaw === 'order_context' ? '订单商品'
+        : (productSourceRaw === 'user_goods_card' || productFromChat.source === 'user_goods_card') ? '买家商品卡'
+        : (productSourceRaw === 'user_goods_url' ? '买家商品链接' : (productSourceRaw || '-'));
+
+      const board = [
+        ['回复来源', sourceLabel],
+        ['接待路径', pathLabel],
+        ['买家意图', intentLabel],
+        ['路由规则', routeLabel],
+        ['订单状态', orderState.label],
+        ['订单号', hasOrder ? (orderDisplay === '无' ? '未选定' : orderDisplay) : (orderState.kind === 'no-order' ? '无' : '未确认')],
+        ['商品', productLabel],
+        ['设备号', equipmentDisplay],
+        ['ICCID / 卡号', cardDisplay],
+        ['运营商', operatorDisplay],
+        ['卡状态', cardStatusDisplay],
+        ['实名状态', realNameDisplay],
+        ['二次实名（接口）', secondaryRealnameDisplay],
+        ['二次实名处理', secondaryRealnameActionDisplay],
+        ['当前使用卡判断', currentCardReasonDisplay],
+        ['当前套餐', packageDisplay],
+        ['流量状态', flowDisplay],
+        ['信号强度（RSSI）', signalDisplay],
+        ['状态更新时间', statusUpdatedAt],
+        ['本段历史', `${histCount} 条（${reasonText}）`],
+        ['话术', scripts.length ? scriptPlainList(scripts) : '未命中标准话术'],
+        ['查卡工具', tools.length ? toolPlainList(tools) : (skipTool ? (toolSkipText || '本轮未查卡') : '未调用')],
+        ['大模型', llmOk ? `已调用 ${d.model || ''}`.trim() : (modelErr ? `失败：${modelErr.slice(0, 80)}` : '未调用')],
+        ['端到端耗时', timing ? formatShadowDuration(timing.endToEndMs) : '-'],
+        ['其中排队', timing && timing.queueWaitMs != null ? formatShadowDuration(timing.queueWaitMs) : '-'],
+        ['其中处理', timing && timing.processingMs != null ? formatShadowDuration(timing.processingMs) : '-'],
+        ['模型 / 核心链路', d.elapsed_ms != null ? `${d.elapsed_ms} ms` : '-'],
+      ];
+
+      // Keep steps short: only decision-critical narrative.
+      const steps = [];
+      steps.push({
+        title: '1. 本轮结论',
+        detail: [
+          `用「${sourceLabel}」生成了回复。`,
+          `意图：${intentLabel}；路由：${routeLabel}。`,
+          orderState.kind === 'ordered'
+            ? '买家侧有订单上下文，话术库优先级会降低。'
+            : (orderState.kind === 'no-order'
+              ? '已确认当前店铺无订单，优先用售前话术回答问题。'
+              : '本轮订单状态未确认，不据此推断买家是否下单。'),
+          scripts.length ? '已命中店铺话术。' : '未命中可直发话术。',
+          llmOk ? '由大模型组织最终措辞。' : (modelErr ? '大模型调用失败，走了本地兜底。' : '未调用大模型。'),
+        ].join('\n'),
+      });
+      steps.push({
+        title: '2. 上下文齐不齐',
+        detail: [
+          `订单：${orderState.label}${hasOrder && orderDisplay !== '无' ? `（${orderDisplay}）` : ''}`,
+          `商品：${productLabel}${productId || productTitle ? `（来源 ${productSourceLabel}）` : ''}`,
+          `设备号：${equipmentDisplay}`,
+          `ICCID / 卡号：${cardDisplay}`,
+          `运营商：${operatorDisplay}`,
+          `卡状态：${cardStatusDisplay}；实名：${realNameDisplay}；二次实名接口值：${secondaryRealnameDisplay}`,
+          `当前使用卡：${currentCardReasonDisplay}；二次实名处理：${secondaryRealnameActionDisplay}`,
+          `套餐：${packageDisplay}；流量：${flowDisplay}`,
+          `历史：${histCount} 条 · 切段 ${reasonText}`,
+          `品类策略：${pack.label || decision.label || decision.category || '未标注'}`,
+        ].join('\n'),
+      });
+      steps.push({
+        title: '3. 为什么是这句回复',
+        detail: [
+          `路径：${pathLabel}`,
+          `资料：${scriptPlainList(scripts)}`,
+          `知识：${d.knowledge_hit ? '有命中' : (d.knowledge_queried === false ? '本轮未查' : '未命中')}`,
+          `工具：${tools.length ? toolPlainList(tools) : (toolSkipText || '未调用')}`,
+          modelErr ? `模型错误：${modelErr.slice(0, 160)}` : '',
+        ].filter(Boolean).join('\n'),
+      });
+      steps.push({
+        title: '4. 发送与安全',
+        detail: [
+          `转人工：${humanYesNo(!!(sop.handoff || finalDecision.handoff))}`,
+          `允许发送：${humanYesNo(finalDecision.allowed_to_send)}`,
+          '真实发出：否（观察/模拟）',
+          `风险：${d.risk_level || classification.risk_level || 'low'}`,
+          `情绪：${emotion.label || '平静'}`,
+        ].join('\n'),
+      });
+
+      return {
+        summary,
+        board,
+        steps,
+        productLabel,
+        statusText,
+        pathLabel,
+        sourceLabel,
+        intentLabel,
+        hasOrder,
+        orderState,
+      };
+    }
+
+    function sessionSignature(messages) {
+      return JSON.stringify((messages || []).map(m => [
+        m._sequence || m.sequence || 0,
+        m.msg_id || '',
+        m.parent_msg_id || '',
+        m.role || '',
+        m.ts || 0,
+        m.display_content || m.content || '',
+        m.delivery_status || '',
+        m.shadow_status || '',
+        m.error || '',
+        m.has_whitebox ? 1 : 0,
+        m.shadow_latency_ms || 0,
+      ]));
+    }
+
+    function renderCorrectionForm(m, d, detailPrefix) {
+      // 仅质检/班长/店长等有纠正权限的角色可见纠错入口
+      if (typeof hasPerm === 'function' && !hasPerm('capabilities.corrections')) return '';
+      const saved = d.correction || {};
+      if (saved.id) {
+        return `<div class="correction-saved">${'\u5df2\u4fdd\u5b58\u4e3a\u5f85\u5ba1\u6838\u7ea0\u6b63'} / ${escapeHtml(saved.error_type || 'other')} / ID ${escapeHtml(saved.id)}</div>`;
+      }
+      if (m.shadow_status !== 'succeeded') return '';
+      const key = `${detailPrefix}:correction`;
+      return `<details class="correction-box" data-detail-key="${escapeHtml(key)}" open>
+        <summary>${'\u7ea0\u6b63\u8fd9\u6761\u56de\u590d\uff08\u8d28\u68c0\uff1a\u4ec5\u5f85\u5ba1\u6838\uff0c\u4e0d\u53d1\u9001\u3001\u4e0d\u53d1\u5e03\uff09'}</summary>
+        <form class="correction-form" data-correction-msg="${escapeHtml(m.msg_id || '')}">
+          <label>${'\u6b63\u786e\u56de\u590d'}<textarea name="expected_reply" required maxlength="3000" placeholder="${'\u586b\u5199\u4f60\u8ba4\u4e3a\u6b63\u786e\u7684\u5ba2\u670d\u56de\u590d'}"></textarea></label>
+          <div class="correction-grid">
+            <label>${'\u9519\u8bef\u7c7b\u578b'}<select name="error_type">
+              <option value="tone">${'\u8bed\u6c14/\u60c5\u7eea\u5904\u7406'}</option>
+              <option value="script_match">${'\u8bdd\u672f\u5339\u914d'}</option>
+              <option value="knowledge">${'\u77e5\u8bc6\u9519\u8bef'}</option>
+              <option value="card_status">${'\u5de5\u5177/\u5361\u72b6\u6001'}</option>
+              <option value="sop">${'\u6d41\u7a0b/SOP'}</option>
+              <option value="prompt_following">${'\u672a\u9075\u5faa\u63d0\u793a\u8bcd'}</option>
+              <option value="should_handoff">${'\u5e94\u8f6c\u4eba\u5de5'}</option>
+              <option value="hallucination">${'\u5e7b\u89c9/\u7f16\u9020'}</option>
+              <option value="other">${'\u5176\u4ed6'}</option>
+            </select></label>
+            <label>${'\u6539\u8fdb\u52a8\u4f5c'}<select name="correction_action">
+              <option value="auto">${'\u81ea\u52a8\u5efa\u8bae'}</option>
+              <option value="script">${'\u8bdd\u672f'}</option>
+              <option value="knowledge">${'\u77e5\u8bc6'}</option>
+              <option value="sop">SOP</option>
+              <option value="rule">${'\u89c4\u5219'}</option>
+              <option value="handoff">${'\u8f6c\u4eba\u5de5'}</option>
+              <option value="prompt">Prompt</option>
+              <option value="regression_only">${'\u4ec5\u56de\u5f52\u7528\u4f8b'}</option>
+            </select></label>
+          </div>
+          <div class="correction-grid">
+            <label>${'\u4f5c\u7528\u8303\u56f4'}<select name="apply_scope">
+              <option value="shop">${'\u5f53\u524d\u5e97\u94fa'}</option>
+              <option value="issue">${'\u5f53\u524d\u95ee\u9898\u7c7b\u578b'}</option>
+              <option value="all_mobile_wifi">${'\u5168\u90e8\u79fb\u52a8WiFi'}</option>
+              <option value="all_shops">${'\u5168\u90e8\u5e97\u94fa'}</option>
+            </select></label>
+            <label>${'\u9519\u8bef\u8bf4\u660e'}<input name="error_detail" maxlength="500" placeholder="${'\u53ef\u9009\uff1a\u8bf4\u660e\u4e3a\u4ec0\u4e48\u9519'}" /></label>
+          </div>
+          <button class="correction-submit" type="submit">${'\u4fdd\u5b58\u4e3a\u5f85\u5ba1\u6838\u7ea0\u6b63'}</button>
+        </form>
+      </details>`;
+    }
+
+    function renderWhitebox(m) {
+      const d = m.whitebox || {};
+      const bridge = d.bridge || {};
+      const classification = d.classification || {};
+      const emotion = d.emotion || classification.emotion || {};
+      const sop = d.sop || {};
+      const finalDecision = d.final_decision || {};
+      const scripts = Array.isArray(d.script_hits) ? d.script_hits : [];
+      const tools = Array.isArray(d.tool_calls) ? d.tool_calls : [];
+      const status = m.shadow_status || '';
+      const timing = shadowTiming(m);
+      if (!status && !Object.keys(d).length) return '';
+
+      const story = buildWhiteboxStory(m);
+      const risk = d.risk_level || classification.risk_level || '-';
+      const allowed = finalDecision.allowed_to_send;
+      const modelFailed = !!(finalDecision.model_error);
+      const pills = [
+        `<span class="trace-pill ${status === 'succeeded' ? 'ok' : (status === 'failed' ? 'warn' : '')}">${escapeHtml(story.statusText)}</span>`,
+        timing ? `<span class="trace-pill ok">端到端 ${escapeHtml(formatShadowDuration(timing.endToEndMs))}</span>` : '',
+        `<span class="trace-pill ok">${escapeHtml(story.sourceLabel || humanPath(d.path, bridge.pipeline))}</span>`,
+        `<span class="trace-pill">${escapeHtml(story.intentLabel || '意图未明')}</span>`,
+        `<span class="trace-pill ${story.orderState.kind === 'ordered' ? 'ok' : (story.orderState.kind === 'no-order' ? 'warn' : '')}" title="${escapeHtml(story.orderState.detail)}">${escapeHtml(story.orderState.label)}</span>`,
+        `<span class="trace-pill ${d.llm_called && !modelFailed ? 'ok' : (modelFailed ? 'warn' : '')}">${d.llm_called && !modelFailed ? '已用 AI' : (modelFailed ? 'AI失败' : '未调 AI')}</span>`,
+        `<span class="trace-pill ${scripts.length ? 'ok' : ''}">${scripts.length ? `话术×${scripts.length}` : '无话术'}</span>`,
+        `<span class="trace-pill ${risk === 'high' ? 'warn' : (risk === 'low' ? 'ok' : '')}">风险${escapeHtml(risk === 'low' ? '低' : (risk === 'high' ? '高' : risk))}</span>`,
+        `<span class="trace-pill ${sop.handoff || finalDecision.handoff ? 'warn' : 'ok'}">转人工${humanYesNo(!!(sop.handoff || finalDecision.handoff))}</span>`,
+        `<span class="trace-pill ${allowed === false ? 'warn' : 'ok'}">可发${humanYesNo(allowed)}</span>`,
+      ].filter(Boolean);
+
+      const error = d.error || m.error || finalDecision.model_error || '';
+      const detailPrefix = `whitebox:${m.msg_id || m.parent_msg_id || m.ts || 'unknown'}`;
+      const policy = pickPolicy(d);
+      const boardHtml = Array.isArray(story.board) && story.board.length
+        ? `<div class="wb-board">${story.board.map(([k, v]) => `
+            <div class="wb-board-row"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? '-'))}</div></div>
+          `).join('')}</div>`
+        : '';
+
+      return `<div class="whitebox">
+        <div class="wb-story">
+          <div class="wb-summary">${escapeHtml(story.summary)}</div>
+          <div class="tracebar">${pills.join('')}</div>
+          ${error ? `<div class="trace-error">${escapeHtml(String(error).slice(0, 500))}</div>` : ''}
+          ${boardHtml}
+          ${renderStorySteps(story.steps)}
+          <div class="wb-note">上面是「决策看板」：看为什么这样回。JSON/提示词在下方「技术细节」，日常不用展开。</div>
+        </div>
+        ${renderCorrectionForm(m, d, detailPrefix)}
+        <details data-detail-key="${escapeHtml(detailPrefix + ':tech')}">
+          <summary>技术细节（开发/排查用，可折叠）</summary>
+          <div style="padding:8px">
+            ${debugDetails('商品与品类策略', policy, true, `${detailPrefix}:policy`)}
+            ${debugDetails('命中的商家话术', scripts, scripts.length > 0, `${detailPrefix}:scripts`)}
+            ${debugDetails('售后流程 / SOP', sop, false, `${detailPrefix}:sop`)}
+            ${debugDetails('工具调用', tools, tools.length > 0, `${detailPrefix}:tools`)}
+            ${debugDetails('最终决策', finalDecision, false, `${detailPrefix}:decision`)}
+            ${debugDetails('情绪识别', emotion, false, `${detailPrefix}:emotion`)}
+            ${debugDetails('规则判断', d.rule_policy || classification.rule_policy, false, `${detailPrefix}:rules`)}
+            ${debugDetails('诊断轨迹', d.diagnosis_trace, false, `${detailPrefix}:diagnosis`)}
+            ${debugDetails('合并知识上下文', d.compiled_knowledge_context || d.product_knowledge, false, `${detailPrefix}:context`)}
+            ${debugDetails(`系统提示词${d.prompt_name ? ' · ' + d.prompt_name : ''}`, d.system_prompt, false, `${detailPrefix}:system-prompt`)}
+            ${debugDetails('完整白盒 JSON', d, false, `${detailPrefix}:full-json`)}
+          </div>
+        </details>
+      </div>`;
+    }
+
+    function messageKey(m, index = 0) {
+      return String(m?.msg_id || `${m?.role || 'message'}:${m?.ts || 0}:${index}`);
+    }
+
+    function messageBatchIds(m) {
+      if (!m) return [];
+      const simulated = m.role === 'assistant_simulated' || m.delivery_status === 'simulated';
+      if (m.role === 'user') return m.msg_id ? [String(m.msg_id)] : [];
+      if (!simulated) return [];
+      const wb = m.whitebox || {};
+      const bridge = wb.bridge || {};
+      const input = wb.input_context || {};
+      const batch = bridge.message_batch || input.message_batch || wb.message_batch || {};
+      const ids = Array.isArray(batch.message_ids) ? batch.message_ids : [];
+      const normalized = ids.map(value => String(value || '')).filter(Boolean);
+      if (!normalized.length && m.parent_msg_id) normalized.push(String(m.parent_msg_id));
+      return [...new Set(normalized)];
+    }
+
+    function shadowRegenerateMessageId(m) {
+      if (!m) return '';
+      const wb = m.whitebox || {};
+      const bridge = wb.bridge || {};
+      const input = wb.input_context || {};
+      const batch = bridge.message_batch || input.message_batch || wb.message_batch || {};
+      const latest = String(batch.latest_msg_id || m.parent_msg_id || '').trim();
+      if (latest) return latest;
+      const ids = messageBatchIds(m);
+      return ids.length ? ids[ids.length - 1] : '';
+    }
+
+    function messageQuestionRefs(m) {
+      return messageBatchIds(m)
+        .map(questionId => currentQuestionRefById.get(String(questionId)) || '')
+        .filter((value, index, values) => value && values.indexOf(value) === index);
+    }
+
+    function messageQuestionRef(m) {
+      return messageQuestionRefs(m)[0] || '';
+    }
+
+    function messageQuestionLabel(m) {
+      const refs = messageQuestionRefs(m);
+      if (!refs.length) return '';
+      if (m.role === 'user') return `问题 #${refs[0]}`;
+      return `回复 ${refs.map(ref => `#${ref}`).join('、')}`;
+    }
+
+    function pddBusinessOrderFromText(value) {
+      const match = String(value || '').match(/(?:^|\D)(26\d{4}-\d{12,18})(?!\d)/);
+      return match ? match[1] : '';
+    }
+
+    function resolveOrderState(m, linkedShadow, resolvedCard = null) {
+      const sources = [];
+      [linkedShadow, m].forEach(source => {
+        if (source && !sources.includes(source)) sources.push(source);
+      });
+      const orderedStates = new Set([
+        'single_order_selected', 'latest_order_selected',
+        'multiple_orders_unselected', 'order_context_unselected',
+      ]);
+
+      for (const source of sources) {
+        const wb = source.whitebox || {};
+        const bridge = wb.bridge || {};
+        const input = wb.input_context || {};
+        const oc = bridge.order_card || input.order_card || {};
+        const summaries = [
+          bridge.order_info_summary, oc.order_info_summary,
+          input.order_info_summary, wb.order_info_summary,
+          source.order_info,
+        ];
+        for (const summary of summaries) {
+          if (!summary || typeof summary !== 'object' || !Object.keys(summary).length) continue;
+          const rawCount = summary.order_count;
+          const parsedCount = rawCount === undefined || rawCount === null || rawCount === ''
+            ? null : Number(rawCount);
+          const count = Number.isFinite(parsedCount) ? Math.max(0, parsedCount) : null;
+          const lookupState = String(summary.lookup_state || summary.order_lookup_state || '').trim();
+          const selectedOrder = summary.selected_order && typeof summary.selected_order === 'object'
+            ? summary.selected_order : {};
+          const summaryOrderId = summary.order_id || summary.order_id_masked
+            || selectedOrder.order_id || selectedOrder.order_id_masked || '';
+          if (summaryOrderId || (count != null && count > 0) || orderedStates.has(lookupState)) {
+            const countLabel = count != null && count > 1 ? ` · ${count}笔` : '';
+            const ambiguous = summary.ambiguous === true || lookupState === 'multiple_orders_unselected';
+            const selectionReason = String(summary.selection_reason || summary.selected_by || '').trim();
+            const latestSelected = lookupState === 'latest_order_selected' || selectionReason === 'latest_order';
+            const userSelected = selectionReason === 'user_provided' || selectionReason === 'chat_text';
+            return {
+              kind: 'ordered',
+              label: `已下单${countLabel}`,
+              detail: userSelected
+                ? '已使用买家明确发送的订单号'
+                : (latestSelected && count > 1
+                  ? `已查到 ${count} 笔订单，默认使用最近一笔`
+                  : (ambiguous && count
+                ? `已查到 ${count} 笔订单，当前未选定具体订单`
+                : (count ? `已查到 ${count} 笔订单` : '已关联订单'))),
+            };
+          }
+          const contextReceived = summary.context_received === true;
+          const unconfirmedEmpty = summary.empty_result_unconfirmed === true
+            || lookupState === 'order_lookup_empty_unconfirmed'
+            || (String(summary.source || '') === 'taobao_mtop_context'
+              && contextReceived && count === 0 && summary.confirmed_empty !== true);
+          if (unconfirmedEmpty) {
+            return {
+              kind: 'unknown',
+              label: '订单未读取',
+              detail: '客户端本次未读取到订单，不能据此判断买家未下单',
+            };
+          }
+          const explicitNoOrder = summary.no_orders === true || summary.order_no_orders === true
+            || lookupState === 'no_orders';
+          if (explicitNoOrder || (contextReceived && count === 0)) {
+            return {
+              kind: 'no-order',
+              label: '未下单',
+              detail: '已查询当前店铺订单，未找到订单',
+            };
+          }
+        }
+        if (wb.has_order_context === true || input.has_order_context === true
+            || wb.order_id_provided === true || input.order_id_provided === true) {
+          return { kind: 'ordered', label: '已下单', detail: '白盒已确认存在订单上下文' };
+        }
+      }
+
+      const card = resolvedCard || pickOrderCardFacts(m, linkedShadow);
+      if (card && (card.orderId || card.orderMasked)) {
+        return { kind: 'ordered', label: '已下单', detail: '已关联订单号' };
+      }
+      return { kind: 'unknown', label: '订单未确认', detail: '本轮没有可靠的订单查询结果' };
+    }
+
+    function pickOrderCardFacts(m, linkedShadow) {
+      const sources = [];
+      // For AI whitebox: prefer the simulated message itself.
+      // For buyer messages: prefer linked shadow (has resolved product/order/ICCID).
+      if (linkedShadow) sources.push(linkedShadow);
+      if (m) sources.push(m);
+      // Prefer simulated whitebox bridge (has tool lookup), then message fields.
+      for (const src of sources) {
+        const wb = src.whitebox || {};
+        const bridge = wb.bridge || {};
+        const input = wb.input_context || {};
+        const oc = bridge.order_card || input.order_card || {};
+        const cardStatus = input.card_status || {};
+        const mw = bridge.mobile_wifi_tools || input.mobile_wifi_tools || wb.mobile_wifi_tools || {};
+        const srcOrderInfo = src.order_info && typeof src.order_info === 'object' ? src.order_info : {};
+        const selectedOrder = srcOrderInfo.selected_order && typeof srcOrderInfo.selected_order === 'object'
+          ? srcOrderInfo.selected_order : {};
+        const storedOrderId = oc.order_id || bridge.order_id || input.order_id || wb.order_id || src.order_id || '';
+        const orderMasked = oc.order_id_masked || bridge.order_id_masked || input.order_id_masked || wb.order_id_masked
+          || srcOrderInfo.order_id_masked || selectedOrder.order_id_masked || '';
+        const cardId = oc.card_id || bridge.card_id || input.card_id || wb.card_id
+          || oc.iccid || bridge.iccid || input.iccid || wb.iccid || '';
+        const cardMasked = oc.card_id_masked || bridge.card_id_masked || input.card_id_masked || wb.card_id_masked
+          || oc.iccid_masked || bridge.iccid_masked || input.iccid_masked || wb.iccid_masked || '';
+        const equipmentNo = oc.equipment_no || bridge.equipment_no || input.equipment_no || cardStatus.equipment_no || '';
+        const equipmentMasked = oc.equipment_no_masked || bridge.equipment_no_masked
+          || input.equipment_no_masked || (String(cardStatus.equipment_no || '').includes('*') ? cardStatus.equipment_no : '');
+        const productId = oc.product_id || oc.goods_id || bridge.product_id || bridge.goods_id || bridge.context_product_id
+          || input.product_id || input.goods_id || wb.product_id || wb.goods_id
+          || srcOrderInfo.goods_id || srcOrderInfo.product_id || selectedOrder.goods_id || selectedOrder.product_id
+          || src.goods_id || src.product_id || '';
+        const productTitle = oc.product_title || oc.goods_name || bridge.product_title || bridge.goods_name
+          || input.product_title || input.goods_name || wb.product_title || wb.goods_name
+          || srcOrderInfo.goods_name || srcOrderInfo.product_name || selectedOrder.goods_name || selectedOrder.product_name
+          || src.goods_name || src.product_name || '';
+        const productSpec = oc.product_spec || oc.goods_spec || bridge.product_spec || bridge.goods_spec
+          || input.product_spec || input.goods_spec || wb.product_spec || wb.goods_spec
+          || srcOrderInfo.goods_spec || srcOrderInfo.product_spec || selectedOrder.goods_spec || selectedOrder.product_spec
+          || src.goods_spec || src.product_spec || '';
+        const businessOrderId = pddBusinessOrderFromText(storedOrderId)
+          || pddBusinessOrderFromText(productSpec);
+        const orderId = businessOrderId || storedOrderId;
+        const productSource = oc.product_source || bridge.product_source || input.product_source || wb.product_source
+          || srcOrderInfo.source || selectedOrder.source || '';
+        const productUrl = oc.product_url || oc.goods_url || bridge.product_url || bridge.goods_url
+          || input.product_url || input.goods_url || wb.product_url || wb.goods_url
+          || srcOrderInfo.goods_url || srcOrderInfo.product_url || selectedOrder.goods_url || selectedOrder.product_url
+          || src.goods_url || src.product_url || '';
+        const productThumbUrl = oc.product_thumb_url || oc.goods_thumb_url || bridge.product_thumb_url || bridge.goods_thumb_url
+          || input.product_thumb_url || input.goods_thumb_url || wb.product_thumb_url || wb.goods_thumb_url
+          || srcOrderInfo.goods_thumb_url || srcOrderInfo.product_thumb_url || selectedOrder.goods_thumb_url || selectedOrder.product_thumb_url
+          || src.goods_thumb_url || src.product_thumb_url || '';
+        const productPrice = oc.product_price || oc.goods_price || bridge.product_price || bridge.goods_price
+          || input.product_price || input.goods_price || wb.product_price || wb.goods_price
+          || srcOrderInfo.goods_price || srcOrderInfo.product_price || selectedOrder.goods_price || selectedOrder.product_price
+          || src.goods_price || src.product_price || '';
+        const orderInfo = Object.keys(srcOrderInfo).length
+          ? srcOrderInfo
+          : (bridge.order_info_summary || oc.order_info_summary || input.order_info_summary || wb.order_info_summary || {});
+        const hasAny = orderId || orderMasked || cardId || cardMasked || equipmentNo || equipmentMasked
+          || productId || productTitle || productSpec || productUrl || productThumbUrl || productPrice
+          || oc.card_status_text || cardStatus.card_status_text
+          || oc.lookup_label || bridge.order_id_source || input.order_id_source
+          || Object.keys(orderInfo).length;
+        if (!hasAny) continue;
+        return {
+          orderId: orderId || orderMasked || '',
+          orderMasked: orderMasked || orderId || '',
+          orderSource: oc.order_id_source_label || bridge.order_id_source_label
+            || bridge.order_id_source || input.order_id_source || oc.order_id_source || '',
+          portalOk: oc.order_portal_compatible != null ? oc.order_portal_compatible : bridge.order_portal_compatible,
+          lookupLabel: oc.lookup_label || '',
+          cardId: cardId || cardMasked || '',
+          cardMasked: cardMasked || cardId || '',
+          equipmentNo: equipmentNo || equipmentMasked || '',
+          equipmentMasked: equipmentMasked || '',
+          operator: oc.operator || cardStatus.operator || cardStatus.operator_name || '',
+          cardStatusText: oc.card_status_text || cardStatus.card_status_text || cardStatus.account_status_text || '',
+          accountStatus: oc.account_status || cardStatus.account_status || '',
+          packageName: oc.package_name || cardStatus.package_name || '',
+          realNameStatus: oc.real_name_status || cardStatus.real_name_status || '',
+          realNameMessage: oc.real_name_message || cardStatus.real_name_message || '',
+          realNameSummary: oc.real_name_summary || cardStatus.real_name_summary || '',
+          otherCardVerified: oc.other_card_verified ?? cardStatus.other_card_verified,
+          secondaryRealname: oc.secondary_realname ?? cardStatus.secondary_realname,
+          secondaryRealnameActionRequired: oc.secondary_realname_action_required ?? cardStatus.secondary_realname_action_required,
+          currentCardSelectionReason: oc.current_card_selection_reason || cardStatus.current_card_selection_reason || '',
+          hasFlowRecord: oc.has_flow_record ?? cardStatus.has_flow_record,
+          remainingFlowMb: oc.remaining_flow_mb ?? cardStatus.remaining_flow_mb,
+          totalFlowMb: oc.total_flow_mb ?? cardStatus.total_flow_mb,
+          remainingDataGb: oc.remaining_data_gb ?? cardStatus.remaining_data_gb,
+          totalDataGb: oc.total_data_gb ?? cardStatus.total_data_gb,
+          rssi: oc.rssi ?? cardStatus.rssi,
+          signalLevel: oc.signal_level ?? cardStatus.signal_level,
+          signalQuality: oc.signal_quality || cardStatus.signal_quality || '',
+          weakSignal: oc.weak_signal ?? cardStatus.weak_signal,
+          signalDescription: oc.signal_description || cardStatus.signal_description || '',
+          flowRecordTime: oc.flow_record_time || cardStatus.flow_record_time || '',
+          statusUpdatedAt: oc.status_updated_at || cardStatus.status_updated_at || '',
+          statusComplete: oc.status_complete ?? cardStatus.status_complete,
+          productId: productId || '',
+          productTitle: productTitle || '',
+          productSpec: productSpec || '',
+          productSource: productSource || '',
+          productUrl: productUrl || '',
+          productThumbUrl: productThumbUrl || '',
+          productPrice: productPrice || '',
+          verified: !!(oc.tool_verified || mw.verified),
+          skipReason: oc.tool_skip_reason || mw.skip_reason || '',
+          toolCalls: oc.tool_calls_count != null ? oc.tool_calls_count
+            : (Array.isArray(mw.calls) ? mw.calls.length : 0),
+          statusSource: oc.card_status_source || mw.status_source || '',
+          cards: orderCardFactsList(cardStatus),
+          orderInfo,
+        };
+      }
+      return null;
+    }
+
+    function renderConsultedProductCard(m, linkedShadow) {
+      let card = pickOrderCardFacts(m, linkedShadow);
+      let hasProduct = !!(card && (card.productId || card.productTitle || card.productSpec || card.productUrl || card.productThumbUrl || card.productPrice));
+      if (!hasProduct && linkedShadow) {
+        card = pickOrderCardFacts(m, null);
+        hasProduct = !!(card && (card.productId || card.productTitle || card.productSpec || card.productUrl || card.productThumbUrl || card.productPrice));
+      }
+      if (!hasProduct) return '';
+      const title = card.productTitle || (card.productId ? `商品 ${card.productId}` : '咨询商品');
+      const imageUrl = safeHttpUrl(card.productThumbUrl);
+      const productUrl = safeHttpUrl(card.productUrl);
+      const orderState = resolveOrderState(m, linkedShadow, card);
+      const hasOrder = orderState.kind === 'ordered';
+      const badge = orderState.label;
+      const sourceMap = {
+        bridge_product_context: '买家进线携带',
+        user_goods_card: '买家商品卡',
+        user_goods_url: '买家商品链接',
+        pdd_cdp_order_context: '订单商品',
+        order_context: '订单商品',
+      };
+      const source = sourceMap[card.productSource] || card.productSource || '咨询上下文';
+      const idLine = card.productId ? `<div class="consult-product-meta">商品 ID：${escapeHtml(card.productId)}</div>` : '';
+      const specLine = card.productSpec ? `<div class="consult-product-meta">规格：${escapeHtml(card.productSpec)}</div>` : '';
+      const image = imageUrl
+        ? `<img class="consult-product-thumb" src="${escapeHtml(imageUrl)}" alt="商品图片" loading="lazy" referrerpolicy="no-referrer">`
+        : '<div class="consult-product-thumb placeholder">商品</div>';
+      const price = card.productPrice ? `<span class="consult-product-price">${escapeHtml(card.productPrice)}</span>` : '<span></span>';
+      const link = productUrl
+        ? `<a class="consult-product-link" href="${escapeHtml(productUrl)}" target="_blank" rel="noopener noreferrer">打开商品</a>`
+        : '';
+      return `<div class="consult-product-card">
+        ${image}
+        <div class="consult-product-main">
+          <div class="consult-product-head"><span class="consult-product-label">${escapeHtml(source)}</span><span class="consult-product-badge${hasOrder ? ' ordered' : (orderState.kind === 'unknown' ? ' unknown' : '')}" title="${escapeHtml(orderState.detail)}">${escapeHtml(badge)}</span></div>
+          <div class="consult-product-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+          ${idLine}${specLine}
+          <div class="consult-product-foot">${price}${link}</div>
+        </div>
+      </div>`;
+    }
+
+    function inspectorFacts(m, roleLabel, linkedShadow) {
+      const values = [
+        ['角色', roleLabel],
+        ['时间', fmtTime(m.ts) || '-'],
+        ['消息 ID', m.msg_id || '-'],
+        ['父消息 ID', m.parent_msg_id || '-'],
+        ['来源', m.source || m.bridge_source || '-'],
+        ['投递状态', m.delivery_status || (m.role === 'assistant_simulated' ? 'simulated' : '-')],
+        ['影子状态', m.shadow_status || '-'],
+        ['请求 ID', m.request_id || m.req_id || '-']
+      ];
+      const questionLabel = messageQuestionLabel(m);
+      if (questionLabel) values.splice(1, 0, ['对应编号', questionLabel]);
+      const timing = shadowTiming(m);
+      if (timing) values.splice(2, 0, ['影子端到端耗时', formatShadowDuration(timing.endToEndMs)]);
+
+      const orderCard = pickOrderCardFacts(m, linkedShadow);
+      const orderState = linkedShadow ? resolveOrderState(m, linkedShadow, orderCard) : null;
+      const productTitle = orderCard ? (orderCard.productTitle || '') : '';
+      const productId = orderCard ? (orderCard.productId || '') : '';
+      const productDisplay = productTitle
+        ? (productId ? `${productTitle}（${productId}）` : productTitle)
+        : (productId || '');
+      const orderDisplay = orderCard ? (orderCard.orderId || orderCard.orderMasked || '') : '';
+      const cards = orderCard ? (orderCard.cards || []) : [];
+      const selectedCardDisplay = orderCard ? (orderCard.cardId || orderCard.cardMasked || '') : '';
+      const cardDisplay = multiCardValue(
+        cards,
+        card => `${card.cardId || '-'}${card.isCurrentCard ? '（当前使用卡）' : '（非当前卡）'}`,
+        selectedCardDisplay,
+      );
+      const equipmentDisplay = orderCard ? (orderCard.equipmentNo || orderCard.equipmentMasked || '-') : '-';
+      const selectedCardStatusDisplay = orderCard
+        ? humanCardStatus(orderCard.cardStatusText, orderCard.accountStatus)
+        : '-';
+      const cardStatusDisplay = multiCardValue(
+        cards,
+        card => humanCardStatus(card.cardStatusText, card.accountStatus),
+        selectedCardStatusDisplay,
+      );
+      const selectedRealNameDisplay = orderCard
+        ? humanRealNameStatus(
+          orderCard.realNameStatus,
+          orderCard.realNameMessage,
+          orderCard.realNameSummary,
+          orderCard.otherCardVerified,
+        )
+        : '-';
+      const realNameDisplay = multiCardValue(cards, humanCardRealNameSummary, selectedRealNameDisplay);
+      const secondaryRealnameDisplay = multiCardValue(
+        cards,
+        card => `${humanSecondaryRealname(card.secondaryRealname)}${card.isCurrentCard ? '（当前使用卡）' : '（非当前卡）'}`,
+        humanSecondaryRealname(orderCard?.secondaryRealname),
+      );
+      const secondaryRealnameActionDisplay = orderCard?.secondaryRealnameActionRequired === true
+        ? '当前使用卡需引导'
+        : (orderCard?.secondaryRealnameActionRequired === false ? '当前使用卡无需引导' : '-');
+      const flowDisplay = multiCardValue(cards, humanFlowSummary, orderCard ? humanFlowSummary(orderCard) : '-');
+      const signalDisplay = multiCardValue(cards, humanRssiSummary, orderCard ? humanRssiSummary(orderCard) : '-');
+      const operatorDisplay = multiCardValue(cards, card => card.operator, orderCard?.operator || '-');
+      const packageDisplay = multiCardValue(cards, card => card.packageName, orderCard?.packageName || '-');
+      const statusUpdatedAt = multiCardValue(
+        cards,
+        card => card.statusUpdatedAt || card.flowRecordTime,
+        orderCard?.statusUpdatedAt || orderCard?.flowRecordTime || '-',
+      );
+      values.push(
+        ['商品', productDisplay || '-'],
+        ['订单号', orderDisplay || '-'],
+        ['ICCID / 卡号', cardDisplay || '-'],
+        ['设备号', equipmentDisplay],
+        ['运营商', operatorDisplay],
+        ['卡状态', cardStatusDisplay],
+        ['实名状态', realNameDisplay],
+        ['二次实名（接口）', secondaryRealnameDisplay],
+        ['二次实名处理', secondaryRealnameActionDisplay],
+        ['当前使用卡判断', humanCurrentCardReason(orderCard?.currentCardSelectionReason)],
+        ['当前套餐', packageDisplay],
+        ['流量状态', flowDisplay],
+        ['信号强度（RSSI）', signalDisplay],
+        ['状态更新时间', statusUpdatedAt],
+      );
+
+      const orderTag = orderState
+        ? `<span class="order-state-tag ${escapeHtml(orderState.kind)}" title="${escapeHtml(orderState.detail)}">${escapeHtml(orderState.label)}</span>`
+        : '';
+      return `<div class="inspector-card"><div class="inspector-card-title"><span>消息基本信息</span>${orderTag}</div><div class="inspector-facts">${values.map(([k, v]) => `
+        <div class="inspector-fact"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? '-'))}</div></div>`).join('')}
+      </div></div>`;
+    }
+
+    function inspectorMessageCard(title, content) {
+      return `<div class="inspector-card"><div class="inspector-card-title">${escapeHtml(title)}</div><div class="inspector-message">${escapeHtml(content || '（空消息）')}</div></div>`;
+    }
+
+    function renderInspector(message, options = {}) {
+      const panel = $('inspectorContent');
+      const oldScrollTop = options.scrollTop ?? panel.scrollTop;
+      const detailStates = options.detailStates || new Map(
+        Array.from(panel.querySelectorAll('details[data-detail-key]')).map(el => [el.dataset.detailKey, el.open])
+      );
+      if (!message) {
+        $('inspectorTitle').textContent = '白盒详情';
+        $('inspectorSubtitle').textContent = '点击中间消息查看推理过程';
+        $('inspectorBadge').textContent = '未选择';
+        panel.innerHTML = '<div class="inspector-empty">左侧选会话，中间点消息，右侧显示白盒链路（路由 / 商品 / 话术 / 决策）。</div>';
+        panel.scrollTop = 0;
+        return;
+      }
+    
+      const simulated = message.role === 'assistant_simulated' || message.delivery_status === 'simulated';
+      const isUser = message.role === 'user';
+      const roleLabel = isUser ? (message.nickname || '买家') : (simulated ? '模拟 AI' : staffRoleLabel(message, '客服'));
+      const linkedShadow = isUser && message.msg_id ? currentShadowByParent.get(message.msg_id) : null;
+      const whiteboxSource = simulated ? message : linkedShadow;
+      const parentEntries = whiteboxSource
+        ? messageBatchIds(whiteboxSource)
+            .map(messageId => currentMessageEntries.find(entry => entry.message.msg_id === messageId))
+            .filter(Boolean)
+        : [];
+      const questionLabel = messageQuestionLabel(message);
+    
+      $('inspectorTitle').textContent = isUser
+        ? (linkedShadow ? '买家消息与完整 AI 白盒' : '买家消息详情')
+        : (simulated ? '模拟 AI 白盒' : '客服消息详情');
+      $('inspectorSubtitle').textContent = `${roleLabel}${questionLabel ? ` · ${questionLabel}` : ''} · ${fmtTime(message.ts) || '时间未知'} · ${message.msg_id || '无消息 ID'}`;
+      $('inspectorBadge').textContent = simulated ? '完整白盒' : (isUser ? (linkedShadow ? '完整白盒' : '买家') : '真实消息');
+    
+      let html = inspectorFacts(message, roleLabel, simulated ? message : linkedShadow);
+      if (simulated && parentEntries.length) {
+        const batchContent = parentEntries.map(entry => (
+          `${messageQuestionLabel(entry.message)}\n${entry.message.display_content || entry.message.content || '（空消息）'}`
+        )).join('\n\n');
+        html += inspectorMessageCard(`对应的买家问题（${parentEntries.length} 条）`, batchContent);
+      }
+      html += inspectorMessageCard(simulated ? '模拟 AI 回复内容' : (isUser ? '买家消息内容' : '真实客服回复内容'), message.display_content || message.content);
+      if (isUser && linkedShadow && parentEntries.length > 1) {
+        const batchContent = parentEntries.map(entry => (
+          `${messageQuestionLabel(entry.message)}\n${entry.message.display_content || entry.message.content || '（空消息）'}`
+        )).join('\n\n');
+        html += inspectorMessageCard(`本次 AI 综合处理的买家问题（${parentEntries.length} 条）`, batchContent);
+      }
+    
+      if (isUser) {
+        if (linkedShadow) {
+          html += inspectorMessageCard('对应的模拟 AI 回复', linkedShadow.content);
+          html += renderWhitebox(linkedShadow);
+        } else {
+          html += '<div class="inspector-section-note">这条买家消息暂时没有关联的模拟 AI 回复。可在左侧点击“生成模拟AI + 白盒”，生成结果只进入本地观察链路，不会真实发送。</div>';
+        }
+      } else if (simulated) {
+        html += renderWhitebox(message) || '<div class="inspector-section-note">该模拟消息尚未生成白盒数据。</div>';
+      } else {
+        html += '<div class="inspector-section-note">这是一条真实客服消息，没有影子 AI 白盒。</div>';
+      }
+      html += `<div class="whitebox">${debugDetails('技术细节：完整消息 JSON', message, false, `message:${message.msg_id || message.ts || 'unknown'}:raw`)}</div>`;
+      if (isUser && linkedShadow) {
+        html += `<div class="whitebox">${debugDetails('技术细节：关联 AI 消息 JSON', linkedShadow, false, `message:${linkedShadow.msg_id || linkedShadow.ts || 'unknown'}:linked-ai`)}</div>`;
+      }
+    
+      panel.innerHTML = html;
+      panel.querySelectorAll('.correction-form').forEach(form => {
+        form.onsubmit = event => submitCorrection(event, form);
+      });
+      panel.querySelectorAll('details[data-detail-key]').forEach(el => {
+        if (detailStates.has(el.dataset.detailKey)) el.open = detailStates.get(el.dataset.detailKey);
+      });
+      panel.scrollTop = options.preserveScroll ? oldScrollTop : 0;
+    }
+
+    function timelineMessageKey(message, index = 0) {
+      if (message?.msg_id) return `message:${message.msg_id}`;
+      const sequence = Number(message?._sequence || message?.sequence || 0);
+      return sequence > 0
+        ? `sequence:${sequence}`
+        : `message:${message?.role || 'unknown'}:${message?.ts || 0}:${index}`;
+    }
+
+    function timelineMessageTime(message) {
+      let timestamp = Number(message?.platform_ts_key || message?.ts || 0);
+      if (!Number.isFinite(timestamp)) timestamp = Number(message?.ts || 0);
+      return timestamp > 1e11 ? timestamp / 1000 : timestamp;
+    }
+
+    function mergeTimelineMessages(existing, incoming) {
+      const merged = new Map();
+      (existing || []).forEach((message, index) => {
+        merged.set(timelineMessageKey(message, index), message);
+      });
+      (incoming || []).forEach((message, index) => {
+        const key = timelineMessageKey(message, index);
+        const previous = merged.get(key);
+        if (previous?.whitebox_loaded && !message?.whitebox_loaded) {
+          merged.set(key, {
+            ...previous,
+            ...message,
+            whitebox: previous.whitebox,
+            whitebox_loaded: true,
+            has_whitebox: previous.has_whitebox || message.has_whitebox,
+          });
+        } else {
+          merged.set(key, previous ? {...previous, ...message} : message);
+        }
+      });
+      return Array.from(merged.values()).sort((a, b) => (
+        timelineMessageTime(a) - timelineMessageTime(b)
+        || Number(a._sequence || a.sequence || 0) - Number(b._sequence || b.sequence || 0)
+      ));
+    }
+
+    function rebuildCurrentMessageIndexes() {
+      currentMessageEntries = currentLoadedMessages.map((message, index) => ({
+        message,
+        key: messageKey(message, index),
+      }));
+      currentShadowByParent = new Map();
+      currentQuestionRefById = new Map();
+      let visibleQuestionNo = 0;
+      currentLoadedMessages.forEach(message => {
+        if (message.role === 'user' && message.msg_id) {
+          visibleQuestionNo += 1;
+          const persistedSequence = Number(message._sequence || message.sequence || 0);
+          currentQuestionRefById.set(String(message.msg_id), persistedSequence > 0 ? persistedSequence : visibleQuestionNo);
+        }
+        if (message.role === 'assistant_simulated' || message.delivery_status === 'simulated') {
+          messageBatchIds(message).forEach(messageId => currentShadowByParent.set(messageId, message));
+        }
+      });
+    }
+
+    async function loadSelectedMessageDetail(entry) {
+      if (!entry?.message) return;
+      const linkedShadow = entry.message.role === 'user' && entry.message.msg_id
+        ? currentShadowByParent.get(entry.message.msg_id)
+        : null;
+      const target = linkedShadow || entry.message;
+      const hasWhitebox = target?.has_whitebox || (target?.whitebox && Object.keys(target.whitebox).length);
+      const sequence = Number(target._sequence || target.sequence || 0);
+      const canResolveUserWhitebox = entry.message.role === 'user' && sequence > 0;
+      if ((!hasWhitebox && !canResolveUserWhitebox) || target?.whitebox_loaded) return;
+      if (sequence <= 0) return;
+      const requestKey = `${currentAccount}:${currentBuyer}:${sequence}`;
+      if (messageDetailRequests.has(requestKey)) return messageDetailRequests.get(requestKey);
+      const buyerAtStart = currentBuyer;
+      const accountAtStart = currentAccount;
+      $('inspectorBadge').textContent = '加载中';
+      const query = new URLSearchParams({
+        sequence: String(sequence),
+        buyer_id: String(buyerAtStart || ''),
+        account: String(accountAtStart || ''),
+      });
+      const requestPromise = fetchJSON(`/api/session/message-detail?${query}`)
+        .then(data => {
+          if (currentBuyer !== buyerAtStart || currentAccount !== accountAtStart) return;
+          const details = [data.message, data.whitebox_message].filter(Boolean);
+          currentLoadedMessages = mergeTimelineMessages(currentLoadedMessages, details);
+          currentMaxSequence = Math.max(
+            currentMaxSequence,
+            ...currentLoadedMessages.map(message => Number(message._sequence || message.sequence || 0)),
+          );
+          rebuildCurrentMessageIndexes();
+          const selectedKey = selectedMessageId;
+          if (selectedKey) {
+            selectMessage(selectedKey, { preserveScroll: true, loadDetail: false });
+          }
+        })
+        .catch(error => {
+          console.warn('message detail load failed', error);
+          if (currentBuyer === buyerAtStart && currentAccount === accountAtStart) {
+            toast('白盒详情加载失败：' + error.message);
+          }
+        })
+        .finally(() => messageDetailRequests.delete(requestKey));
+      messageDetailRequests.set(requestKey, requestPromise);
+      return requestPromise;
+    }
+
+    function selectMessage(key, options = {}) {
+      const entry = currentMessageEntries.find(item => item.key === key);
+      selectedMessageId = entry?.key || '';
+      $('messages').querySelectorAll('.bubble-row[data-message-key]').forEach(row => {
+        const selected = row.dataset.messageKey === selectedMessageId;
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', selected ? 'true' : 'false');
+      });
+      renderInspector(entry?.message || null, options);
+      if (options.loadDetail !== false) void loadSelectedMessageDetail(entry);
+    }
+
+    function staffRoleLabel(message, fallback = '客服') {
+      const name = String(message?.staff_display_name || message?.staff_name || '').trim();
+      return name ? `${fallback} · ${name}` : fallback;
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts > 1e12 ? ts : ts * 1000);
+      if (Number.isNaN(d.getTime())) return '';
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      return sameDay
+        ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+        : `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+    }
+
+    function formatShadowDuration(value) {
+      const ms = Math.max(0, Number(value || 0));
+      if (ms < 1000) return `${Math.round(ms)} 毫秒`;
+      if (ms < 60000) return `${Number((ms / 1000).toFixed(1))} 秒`;
+      const minutes = Math.floor(ms / 60000);
+      const seconds = Math.round((ms % 60000) / 1000);
+      return `${minutes} 分 ${seconds} 秒`;
+    }
+
+    function shadowTiming(message) {
+      if (!message || message.shadow_status !== 'succeeded') return null;
+      const rawTiming = message.whitebox && typeof message.whitebox.timing === 'object'
+        ? message.whitebox.timing : {};
+      const rawEndToEnd = message.shadow_latency_ms ?? rawTiming.end_to_end_ms;
+      if (rawEndToEnd === null || rawEndToEnd === undefined || rawEndToEnd === '') return null;
+      const endToEndMs = Number(rawEndToEnd);
+      if (!Number.isFinite(endToEndMs) || endToEndMs < 0) return null;
+      const optionalMs = value => {
+        if (value === null || value === undefined || value === '') return null;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+      };
+      return {
+        endToEndMs,
+        queueWaitMs: optionalMs(rawTiming.queue_wait_ms),
+        processingMs: optionalMs(rawTiming.processing_ms),
+      };
+    }
+
+    function renderShadowLatencyTag(message) {
+      const timing = shadowTiming(message);
+      if (!timing) return '';
+      const breakdown = [
+        `总耗时 ${formatShadowDuration(timing.endToEndMs)}`,
+        timing.queueWaitMs != null ? `排队 ${formatShadowDuration(timing.queueWaitMs)}` : '',
+        timing.processingMs != null ? `处理 ${formatShadowDuration(timing.processingMs)}` : '',
+      ].filter(Boolean).join('；');
+      const primaryMs = timing.processingMs != null ? timing.processingMs : timing.endToEndMs;
+      const primaryLabel = timing.processingMs != null ? '实际处理' : '端到端';
+      return `<span class="shadow-latency-tag" title="${escapeHtml(breakdown)}">${primaryLabel} ${escapeHtml(formatShadowDuration(primaryMs))}</span>`;
+    }
+
+    function avatarText(name) {
+      const s = (name || '?').replace(/\*/g, '');
+      return s.slice(0, 1) || '?';
+    }
+
+    async function fetchJSON(url, opts = {}) {
+      const method = String(opts.method || 'GET').toUpperCase();
+      const headers = new Headers(opts.headers || {});
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+        headers.set('Content-Type', 'application/json');
+      }
+      const ut = authToken();
+      if (ut) headers.set('X-User-Token', ut);
+      const fullUrl = /^https?:\/\//i.test(url) ? url : apiUrl(url);
+      const r = await fetch(fullUrl, { ...opts, headers });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (r.status === 401 && RBAC_ENABLED) {
+          setAuthToken('');
+          authUser = null;
+          applyAuthUi();
+          showLogin(j.error || '请先登录');
+        }
+        const msg = j.error_user || j.error || r.statusText || 'request failed';
+        const err = new Error(msg);
+        err.payload = j;
+        err.status = r.status;
+        throw err;
+      }
+      return j;
+    }
+
+    async function callDesktop(method, ...args) {
+      if (!window.pywebview?.api?.[method]) return null;
+      try { return await window.pywebview.api[method](...args); }
+      catch (e) { console.warn(e); return null; }
+    }
+
+    async function setDockControl(update) {
+      if (!DOCK_MODE) return null;
+      return fetchJSON('/api/dock/control', {
+        method: 'POST',
+        body: JSON.stringify(update),
+      });
+    }
+
+    async function refreshDockControl() {
+      if (!DOCK_MODE) return;
+      try {
+        const state = await fetchJSON('/api/dock/control');
+        pinOn = state.pin !== false;
+        adsorbOn = state.adsorb !== false;
+        $('btnPin').classList.toggle('active', pinOn);
+        $('btnAdsorb').classList.toggle('active', adsorbOn);
+      } catch (error) {
+        console.warn('dock control', error);
+      }
+    }
+
+    function setView(view) {
+      // 三段式工作台常驻；view 仅标记是否已选中会话
+      $('body').dataset.view = view === 'chat' || currentBuyer ? 'chat' : 'workbench';
+    }
+
+    function shopIdFromAccount(account) {
+      const s = String(account || '').trim();
+      if (!s) return 'unknown';
+      const m = s.match(/^cs_(\d+)/i);
+      if (m) {
+        const mapped = (window.__shadowShopMap || {})[s] || (window.__shadowShopMap || {})[`cs_${m[1]}`];
+        if (mapped) return String(mapped);
+        return `mall_${m[1]}`;
+      }
+      const map = window.__shadowShopMap || {};
+      if (map[s]) return String(map[s]);
+      // Prefer server-provided shop_id from sessionsCache when account is 旺旺 nick
+      const hit = (typeof sessionsCache !== 'undefined' ? sessionsCache : []).find(
+        row => String(row.account || '') === s && row.shop_id
+      );
+      if (hit?.shop_id) return String(hit.shop_id);
+      if (s === 'taobao_unknown' || s === 'tb_unknown' || s === 'qianniu_unknown') {
+        // Fallback: sole tb_ shop name map entry
+        const nameMap = window.__shopNameMap || shopNameMap || {};
+        const tbIds = Object.keys(nameMap).filter(k => /^tb_\d+$/.test(k));
+        if (tbIds.length === 1) return tbIds[0];
+        return 'taobao_unknown';
+      }
+      return s;
+    }
+
+    function normalizeAccount(value) {
+      return String(value || '').trim().replace(/^(cs_\d+)_(\d+)$/, '$1:$2');
+    }
+
+    function currentShopBrainState() {
+      if (!currentAccount) return null;
+      const account = normalizeAccount(currentAccount);
+      return shopBrainStates.find(row =>
+        Array.isArray(row.accounts) && row.accounts.some(value => normalizeAccount(value) === account)
+      ) || shopBrainStates.find(row => String(row.shop_id || '') === shopIdFromAccount(account)) || null;
+    }
+
+    let lastDllPort = null;
+    let lastPortDiscovery = '';
+
+    function syncManualSendUI() {
+      const toggle = $('manualSendToggle');
+      const state = $('manualSendState');
+      const button = $('btnQuick');
+      if (!toggle || !state || !button) return;
+      const row = currentShopBrainState();
+      const active = !!currentBuyer && !!row && row.status === 'active';
+      const armed = active && !!row.manual_send_armed;
+      const dllReady = !!lastDllPort;
+      toggle.disabled = !active || manualSendBusy || replyBusy;
+      toggle.checked = armed;
+      button.textContent = '直接回复';
+      button.classList.toggle('manual-armed', armed);
+      const isTaobao = String(row?.platform || '').toLowerCase() === 'taobao'
+        || String(row?.shop_id || '').startsWith('tb_')
+        || String(currentAccount || '') === 'sbpgklso'
+        || (currentAccount && !/^cs_\d+/i.test(String(currentAccount)));
+      button.title = armed
+        ? (isTaobao
+          ? '真实发送给当前千牛买家（经 QianniuBridgeAgent）；点击后仍需二次确认'
+          : (dllReady
+            ? '真实发送给当前买家；点击后仍需二次确认'
+            : '授权已开，但未发现工作台发送端口。请先打开探域注入的拼多多工作台，再点刷新端口'))
+        : '先开启当前店铺的“人工直发”开关';
+      // 淘宝走 Bridge，不依赖拼多多 DLL；拼多多仍要求 DLL
+      button.disabled = !armed || replyBusy || manualSendBusy || (!isTaobao && !dllReady);
+      if (!currentBuyer) {
+        state.textContent = '选择会话后可设置 · 默认关闭';
+        state.classList.remove('armed');
+      } else if (!row) {
+        state.textContent = '当前会话未匹配到店铺，禁止直发';
+        state.classList.remove('armed');
+      } else if (row.status !== 'active') {
+        state.textContent = '当前店铺未启用，禁止直发';
+        state.classList.remove('armed');
+      } else if (armed) {
+        const seconds = Math.max(0, Number(row.manual_send_seconds_remaining || 0));
+        const minutes = Math.max(1, Math.ceil(seconds / 60));
+        if (isTaobao) {
+          state.textContent = `已开启 · 约${minutes}分钟后自动关闭 · 千牛Bridge`;
+        } else if (!dllReady) {
+          state.textContent = `已开启 · 但发送端口未就绪（${lastPortDiscovery || 'not_found'}）`;
+        } else {
+          state.textContent = `已开启 · 约${minutes}分钟后自动关闭 · DLL ${lastDllPort}`;
+        }
+        state.classList.add('armed');
+      } else {
+        state.textContent = '关闭中 · 开启后30分钟自动失效';
+        state.classList.remove('armed');
+      }
+    }
+
+    async function setManualDirectSend(enabled) {
+      const row = currentShopBrainState();
+      if (!currentBuyer || !row) {
+        syncManualSendUI();
+        return toast('当前会话未匹配到可管理店铺');
+      }
+      const shopName = row.shop_name || shopDisplayName(row.shop_id, currentAccount);
+      if (enabled) {
+        const confirmed = window.confirm(
+          `确认开启「${shopName}」人工直发？
+
+• 这是人工真实发送，不是模拟咨询
+• 开启后30分钟自动关闭，后端重启也会关闭
+• 这不会切换大脑，也不会自动关闭探域回复
+• 每条发送前仍会再次确认
+
+请确认当前店铺不会与其他客服或机器人重复回复。`
+        );
+        if (!confirmed) {
+          syncManualSendUI();
+          return;
+        }
+      }
+      manualSendBusy = true;
+      syncManualSendUI();
+      try {
+        const res = await fetchJSON(`/api/capabilities/shop-management/shops/${encodeURIComponent(row.shop_id)}/manual-send`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            enabled: !!enabled,
+            confirm_manual_direct_send: enabled === true,
+          }),
+        });
+        const updated = res.shop || {};
+        shopBrainStates = shopBrainStates.map(item => item.shop_id === updated.shop_id ? updated : item);
+        toast(enabled ? `已开启「${shopName}」人工直发，30分钟后自动关闭` : `已关闭「${shopName}」人工直发`);
+      } catch (e) {
+        toast((enabled ? '开启' : '关闭') + '人工直发失败：' + e.message);
+        await refreshStatus().catch(() => {});
+      } finally {
+        manualSendBusy = false;
+        syncManualSendUI();
+      }
+    }
+
+    function shopDisplayName(sessionOrShopId, account) {
+      // Prefer server-provided Chinese name; never prefer raw mall id
+      if (sessionOrShopId && typeof sessionOrShopId === 'object') {
+        const s = sessionOrShopId;
+        if (s.shop_name && s.shop_name !== s.shop_id && !String(s.shop_name).startsWith('mall_')) return s.shop_name;
+        const sid = s.shop_id || shopIdFromAccount(s.account);
+        if (shopNameMap[sid]) return shopNameMap[sid];
+        if (s.account && shopNameMap[s.account]) return shopNameMap[s.account];
+        const prefix = String(s.account || '').split(':')[0];
+        if (prefix && shopNameMap[prefix]) return shopNameMap[prefix];
+        if (sid && sid.startsWith('name:')) return sid.slice(5);
+        if (sid && sid.startsWith('mall_')) return `店铺${sid.slice(5)}`;
+        if (sid && /^tb_\d+$/.test(sid)) return `淘宝店${sid.slice(3)}`;
+        if (String(s.account || '') === 'taobao_unknown' || sid === 'taobao_unknown') return '淘宝/千牛（未识别店铺）';
+        return sid || '未知店铺';
+      }
+      const sid = String(sessionOrShopId || shopIdFromAccount(account) || '');
+      if (shopNameMap[sid]) return shopNameMap[sid];
+      if (account && shopNameMap[account]) return shopNameMap[account];
+      if (sid.startsWith('name:')) return sid.slice(5);
+      if (sid.startsWith('mall_')) return `店铺${sid.slice(5)}`;
+      if (/^tb_\d+$/.test(sid)) return `淘宝店${sid.slice(3)}`;
+      if (sid === 'taobao_unknown' || account === 'taobao_unknown') return '淘宝/千牛（未识别店铺）';
+      return sid || '未知店铺';
+    }
+
+    // backward-compatible alias used by older call sites
+    function shopShortName(shopId) {
+      return shopDisplayName(shopId);
+    }
+
+    function platformLabel(session) {
+      if (session?.platform_label) return session.platform_label;
+      const p = String(session?.platform || '').toLowerCase();
+      if (p === 'taobao' || p === 'tmall') return '淘宝/千牛';
+      if (p === 'jd') return '京东';
+      if (p === 'douyin') return '抖音';
+      if (p === 'kuaishou') return '快手';
+      if (p === '1688') return '1688';
+      if (p === 'pdd') return '拼多多';
+      // Infer from shop_id / account when server omitted platform
+      const sid = String(session?.shop_id || shopIdFromAccount(session?.account) || '');
+      if (sid.startsWith('tb_') || sid.includes('taobao') || String(session?.account || '') === 'taobao_unknown') return '淘宝/千牛';
+      if (sid.startsWith('mall_') || /^cs_\d+/i.test(String(session?.account || ''))) return '拼多多';
+      return p || '未知平台';
+    }
+
+    function platformBadge(session) {
+      const label = platformLabel(session);
+      let text = '拼';
+      let cls = 'platform platform-pdd';
+      if (label.includes('淘') || label.includes('天猫')) { text = '淘'; cls = 'platform platform-tb'; }
+      else if (label.includes('京')) { text = '京'; cls = 'platform platform-jd'; }
+      else if (label.includes('抖')) { text = '抖'; cls = 'platform platform-dy'; }
+      else if (label.includes('快')) { text = '快'; cls = 'platform platform-ks'; }
+      else if (label.includes('1688')) { text = '阿'; cls = 'platform platform-1688'; }
+      else if (label.includes('未知')) { text = '?'; cls = 'platform platform-unknown'; }
+      else if (label.includes('拼')) { text = '拼'; cls = 'platform platform-pdd'; }
+      return { text, cls, label };
+    }
+
+    function exportFilename(response, fallback) {
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+      if (encoded) {
+        try { return decodeURIComponent(encoded[1].replace(/^"|"$/g, '')); }
+        catch (_) { /* use fallback parser */ }
+      }
+      const plain = disposition.match(/filename="?([^";]+)"?/i);
+      return plain ? plain[1] : fallback;
+    }
+
+    async function downloadExport(endpoint, payload, fallbackFilename, button) {
+      if (exportBusy) return toast('\u6b63\u5728\u751f\u6210\u5bfc\u51fa\u6587\u4ef6\uff0c\u8bf7\u7a0d\u5019');
+      exportBusy = true;
+      const oldText = button?.textContent || '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '\u5bfc\u51fa\u4e2d\u2026';
+      }
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        const ut = authToken();
+        if (ut) headers['X-User-Token'] = ut;
+        const response = await fetch(apiUrl(endpoint), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload || {})
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.error || response.statusText || '\u5bfc\u51fa\u5931\u8d25');
+        }
+        const blob = await response.blob();
+        const filename = exportFilename(response, fallbackFilename);
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+        toast(`\u5df2\u5bfc\u51fa ${filename}`);
+      } catch (error) {
+        toast('\u5bfc\u51fa\u5931\u8d25\uff1a' + error.message);
+      } finally {
+        exportBusy = false;
+        if (button) {
+          button.disabled = button.id === 'btnExportSession' && !currentBuyer;
+          button.textContent = oldText;
+        }
+      }
+    }
+
+    async function refreshStatus() {
+      const st = await fetchJSON(lastStatusRefreshAt ? '/api/status?lite=1' : '/api/status?full=1');
+      lastDllPort = st.dll_port || null;
+      lastPortDiscovery = String(st.port_discovery || '');
+      sendMode = st.send_mode || 'observe';
+      brainMode = st.brain_mode || 'tanyu_shadow';
+      ownAutoSendEnabled = !!st.own_auto_send_enabled;
+      const shopBrains = Array.isArray(st.shop_brains) ? st.shop_brains : shopBrainStates;
+      if (Array.isArray(st.shop_brains)) shopBrainStates = shopBrains;
+      const ownBrainShops = shopBrains.filter(row => row.status === 'active' && row.brain_mode === 'own');
+      const armedShopCount = Number(st.armed_shop_count || 0);
+      const manualArmedShopCount = shopBrains.filter(row => row.status === 'active' && row.manual_send_armed).length;
+      const legacyTakeover = ownAutoSendEnabled && brainMode === 'own_whitelist' && armedShopCount === 0;
+      const takeover = ownAutoSendEnabled && (armedShopCount > 0 || legacyTakeover);
+      const anyOutboundArmed = takeover || manualArmedShopCount > 0;
+      const channel = st.pdd_send_channel || {};
+      const sendReady = !!st.real_send_ready;
+      const safety = $('brainSafety');
+      if (safety) {
+        safety.textContent = takeover
+          ? (sendReady ? `● LIVE：AI 回复将直接发送给买家 · ${armedShopCount} 家店铺 · Windows Bridge/DLL 已就绪` : `● LIVE 已开启，但发送通道异常 · ${channel.online ? (channel.dry_run ? 'Windows Bridge 为 dry-run' : 'Windows DLL 未就绪') : 'Windows Bridge 离线'}`)
+          : (manualArmedShopCount > 0 ? `● SHADOW：AI 不自动发送 · ${manualArmedShopCount} 家店铺允许人工发送` : '● SHADOW：AI 仅生成草稿，不向买家发送');
+        safety.classList.toggle('takeover', takeover && sendReady);
+      }
+      const sendToggle = $('btnBrainSendToggle');
+      if (sendToggle) {
+        sendToggle.textContent = '停止全部 AI 回复';
+        sendToggle.classList.add('danger');
+        sendToggle.classList.toggle('hidden', !takeover);
+        sendToggle.disabled = !hasPerm('brain.send.toggle');
+        sendToggle.title = hasPerm('brain.send.toggle') ? '紧急停止所有店铺的 AI 自动回复' : '停止全部 AI 回复需要班长或店长权限';
+      }
+      if ($('btnBrainTakeover')) {
+        $('btnBrainTakeover').textContent = takeover ? `管理 AI 回复（${armedShopCount}）` : '开启 AI 回复';
+        $('btnBrainTakeover').classList.remove('hidden');
+        $('btnBrainTakeover').disabled = !hasPerm('shops.manage');
+        $('btnBrainTakeover').title = hasPerm('shops.manage') ? '按店铺开启或停止 AI 回复' : '管理 AI 回复需要店长权限';
+      }
+      // Shop/account display-name mapping from config and kefu sync
+      const map = st.shop_name_map || st.config?.shop_name_map || {};
+      let shopNameMapChanged = false;
+      if (map && typeof map === 'object') {
+        shopNameMapChanged = Object.entries(map).some(([key, value]) => shopNameMap[key] !== value);
+        shopNameMap = { ...shopNameMap, ...map };
+        window.__shopNameMap = shopNameMap;
+      }
+      const shopMap = st.shadow_shop_map || st.config?.shadow_shop_map || {};
+      if (shopMap && typeof shopMap === 'object') {
+        window.__shadowShopMap = { ...(window.__shadowShopMap || {}), ...shopMap };
+      }
+      $('watchStatus').innerHTML = st.watching
+        ? '<span class="dot on"></span>监听中'
+        : '<span class="dot off"></span>未监听';
+      const shadow = st.shadow || {};
+      const shadowText = shadow.running ? '影子AI生成中' : (shadow.enabled ? '影子AI已启用' : '影子AI手动模式');
+      const dllLabel = st.dll_port
+        ? `DLL ${st.dll_port}`
+        : `DLL 未就绪${st.port_discovery ? '(' + st.port_discovery + ')' : ''}`;
+      $('portStatus').textContent = takeover
+        ? (legacyTakeover ? `旧版全局接管发送中 · ${dllLabel}` : `我的模型发送中 · ${armedShopCount}家店铺 · ${dllLabel}`)
+        : (manualArmedShopCount > 0
+          ? `人工直发已授权 · ${manualArmedShopCount}家店铺 · ${dllLabel}`
+          : (ownBrainShops.length ? `我的模型待命 · 我方不发送 · ${dllLabel}` : `探域回复 · ${shadowText} · 我方不发送 · ${dllLabel}`));
+      $('sessCount').textContent = `${st.session_count || 0} 会话`;
+      $('titleSub').textContent = $('body').dataset.space === 'capabilities'
+        ? '能力中心 · 安全验证'
+        : (takeover
+          ? (legacyTakeover ? '旧版全局接管' : `我的模型 · ${armedShopCount}店发送`)
+          : (manualArmedShopCount > 0 ? `人工直发 · ${manualArmedShopCount}店授权` : '店铺级大脑控制'));
+      const observe = sendMode === 'observe';
+      $('btnSend').textContent = observe ? '模拟咨询' : '提交发送';
+      const ta = $('replyText');
+      if (ta) {
+        ta.placeholder = observe
+          ? '输入买家会问的话，例如：这个包邮吗 / 能连网吗'
+          : '输入要发送给买家的回复';
+      }
+      const chips = $('consultQuick');
+      if (chips) chips.classList.toggle('hidden', !observe);
+      const epOpt = $('consultEpisodeOpt');
+      if (epOpt) epOpt.classList.toggle('hidden', !observe);
+      $('safeNote').textContent = takeover
+        ? (legacyTakeover
+          ? '● 检测到旧版全局接管仍在发送；请先急停，再到“店铺大脑设置”逐店授权'
+          : `● 店铺级自动发送已开启：${armedShopCount} 家店铺允许我的模型真实发送；紧急情况请点顶部“停止我方发送”`)
+        : (manualArmedShopCount > 0
+          ? `● 人工直发已开启：${manualArmedShopCount} 家店铺临时授权；每条回复仍需二次确认，可用顶部按钮立即全部停止`
+          : (ownBrainShops.length
+            ? '● 部分店铺已选择我的模型，但当前没有店铺获得运行时发送授权'
+            : '● 各店铺默认由探域回复；我的模型只做影子验证，不会自动发送给买家'));
+      $('safeNote').classList.toggle('live', anyOutboundArmed);
+      syncManualSendUI();
+      // names may have arrived; refresh list labels without full data change
+      if (sessionsCache.length) {
+        renderShopFilter();
+        if (shopNameMapChanged || !document.querySelector('.sess:hover')) renderList();
+      }
+    }
+
+    async function refreshSessions() {
+      const search = ($('search').value || '').trim();
+      const effectiveScope = search && filterMode === 'active' ? 'all' : filterMode;
+      const query = new URLSearchParams({
+        paged: '1', scope: effectiveScope, page: String(sessionPage), limit: '50'
+      });
+      if (search) query.set('search', search);
+      if (shopFilterId) query.set('shop_id', shopFilterId);
+      const data = await fetchJSON(`/api/sessions?${query}`);
+      const next = data.sessions || [];
+      next.forEach(session => {
+        const shopId = String(session.shop_id || shopIdFromAccount(session.account) || '');
+        const shopName = String(session.shop_name || '').trim();
+        if (shopId && shopName) shopNameMap[shopId] = shopName;
+      });
+      sessionTotal = Number(data.total ?? next.length);
+      sessionPage = Number(data.page || sessionPage || 1);
+      sessionPages = Number(data.pages || 1);
+      sessionCounts = data.counts || {
+        active: next.length,
+        handoff: next.filter(s => !!s.handoff).length,
+        handoff_unread: next.filter(s => !!s.handoff).reduce(
+          (total, session) => total + Number(session.unread || 0), 0
+        ),
+        all: next.length,
+      };
+      $('sessCount').textContent = `${Number(sessionCounts.all ?? sessionTotal)} 会话`;
+      const incomingShopCounts = data.shop_counts || {};
+      if (!shopFilterId || !Object.keys(sessionShopCounts).length) {
+        sessionShopCounts = incomingShopCounts;
+      } else if (Object.prototype.hasOwnProperty.call(incomingShopCounts, shopFilterId)) {
+        sessionShopCounts = Object.assign({}, sessionShopCounts, {
+          [shopFilterId]: Number(incomingShopCounts[shopFilterId] || 0),
+        });
+      }
+      const signature = JSON.stringify(next.map(s => [
+        s.buyer_id || '', s.account || '', s.nickname || '', s.display_last_content || s.last_content || '',
+        s.last_role || '', s.last_ts || 0, s.unread || 0, s.msg_count || 0,
+        s.handoff ? 1 : 0, s.handoff_reason || '', s.shop_id || '', s.shop_name || '',
+        s.ai_takeover_state || '', s.ai_takeover_enabled ? 1 : 0,
+        s.shop_ai_takeover_enabled ? 1 : 0, s.ai_takeover_override,
+      ]).concat([[sessionPage, sessionPages, sessionTotal, filterMode, shopFilterId, search]]));
+      if (signature === currentListSignature) return;
+      currentListSignature = signature;
+      sessionsCache = next;
+      renderShopFilter();
+      renderList();
+    }
+
+    function renderShopFilter() {
+      const box = $('shopFilter');
+      if (!box) return;
+      const counts = new Map(Object.entries(sessionShopCounts || {}).map(([key,value]) => [key, Number(value || 0)]));
+      if (!counts.size) sessionsCache.forEach(s => {
+        const shop = s.shop_id || shopIdFromAccount(s.account);
+        counts.set(shop, (counts.get(shop) || 0) + 1);
+      });
+      const shops = Array.from(counts.keys()).sort();
+      if (!shops.length) {
+        box.innerHTML = '';
+        box.hidden = true;
+        shopFilterId = '';
+        return;
+      }
+      if (shopFilterId && !counts.has(shopFilterId)) shopFilterId = '';
+      const allCount = Array.from(counts.values()).reduce((sum, value) => sum + Number(value || 0), 0);
+      const options = [
+        `<option value="">全部店铺 (${allCount})</option>`,
+        ...shops.map(id =>
+          `<option value="${escapeHtml(id)}">${escapeHtml(shopDisplayName(id))} (${counts.get(id)})</option>`
+        ),
+      ];
+      box.hidden = false;
+      box.innerHTML = `<select class="shop-select" aria-label="选择店铺">${options.join('')}</select>`;
+      const select = box.querySelector('.shop-select');
+      select.value = shopFilterId;
+      const updateTitle = () => {
+        const option = select.options[select.selectedIndex];
+        select.title = option ? option.textContent : '选择店铺';
+      };
+      updateTitle();
+      select.onchange = async () => {
+        shopFilterId = select.value || '';
+        updateTitle();
+        sessionPage = 1;
+        currentListSignature = '';
+        await refreshSessions();
+      };
+    }
+
+    function updateFilterTabCounts() {
+      document.querySelectorAll('.tab[data-filter]').forEach(tab => {
+        const mode = tab.dataset.filter;
+        if (mode !== 'handoff') {
+          tab.textContent = `最近 ${Number(sessionCounts.active || 0)}`;
+          return;
+        }
+        const unread = Math.max(0, Number(sessionCounts.handoff_unread || 0));
+        const badge = tab.querySelector('.tab-badge');
+        if (!badge) return;
+        badge.hidden = unread === 0;
+        badge.textContent = unread > 99 ? '99+' : String(unread);
+        tab.setAttribute('aria-label', unread ? `待人工接入，${unread} 条未读` : '待人工接入');
+      });
+    }
+
+    function renderSessionPager() {
+      const pager = $('sessionPager');
+      if (!pager) return;
+      pager.hidden = sessionPages <= 1;
+      $('sessionPageLabel').textContent = `${sessionPage} / ${sessionPages}`;
+      $('sessionPrev').disabled = sessionPage <= 1;
+      $('sessionNext').disabled = sessionPage >= sessionPages;
+    }
+
+    function handoffPresentation(session) {
+      if (!session || !session.handoff) return null;
+      const reason = String(session.handoff_reason || '').trim();
+      const humanHandled = reason === 'human_customer_service_reply' || reason === 'human_manual_reply';
+      // Shadow mode must not present a human reply as an active AI handoff.
+      if (humanHandled) {
+        return {
+          label: '人工已接待',
+          tagClass: 'human-handled',
+          rowClass: 'human-handled-row',
+          title: '已有人工客服回复，AI已暂停自动接待',
+        };
+      }
+      return {
+        label: '转人工',
+        tagClass: 'handoff-requested',
+        rowClass: 'handoff-row',
+        title: reason || '等待人工接待',
+      };
+    }
+
+    function renderList() {
+      let list = sessionsCache.slice();
+      if (filterMode === 'handoff') list = list.filter(s => !!s.handoff);
+      if (shopFilterId) list = list.filter(s => (s.shop_id || shopIdFromAccount(s.account)) === shopFilterId);
+      // Search is server-side: message IDs are intentionally absent from list summaries.
+      updateFilterTabCounts();
+      const countLabel = $('listCountLabel');
+      if (countLabel) {
+        const searching = !!($('search').value || '').trim();
+        const modeLabel = searching
+          ? '搜索结果'
+          : (filterMode === 'handoff' ? '待人工接入' : '会话');
+        countLabel.textContent = `${sessionTotal} 个${modeLabel === '会话' ? '' : modeLabel}`;
+      }
+      renderSessionPager();
+      const box = $('sessionList');
+      if (!list.length) {
+        const emptyHint = ($('search').value || '').trim()
+          ? '未找到匹配会话'
+          : filterMode === 'handoff'
+          ? '暂无待人工接入会话<br/>打上人工标记后会出现在这里'
+          : '暂无会话<br/>买家进线后会出现在这里';
+        box.innerHTML = `<div class="empty">${emptyHint}</div>`;
+        return;
+      }
+      // 多店视图按店铺分组；单店视图不重复展示店铺信息。
+      const groups = new Map();
+      list.forEach(s => {
+        const shop = s.shop_id || shopIdFromAccount(s.account);
+        if (!groups.has(shop)) groups.set(shop, []);
+        groups.get(shop).push(s);
+      });
+      const parts = [];
+      const showGroupHeadings = !shopFilterId && groups.size > 1;
+      for (const [shop, items] of groups) {
+        if (showGroupHeadings) {
+          const gName = shopDisplayName(items[0] || shop);
+          parts.push(`<div class="sess-group">${escapeHtml(gName)} · ${escapeHtml(platformLabel(items[0]))} · ${items.length}</div>`);
+        }
+        items.forEach(s => {
+          const active = currentBuyer === s.buyer_id && (currentAccount || '') === (s.account || '') ? 'active' : '';
+          const handoffMeta = handoffPresentation(s);
+          const badge = s.unread ? `<div class="badge">${s.unread > 99 ? '99+' : s.unread}</div>` : '';
+          // Keep the preview useful in the narrow dock: a long workstation name
+          // must not consume the message preview.
+          const role = s.last_role === 'mall_cs'
+            ? '客服'
+            : (s.last_role === 'assistant_simulated' ? 'AI' : '客');
+          const pb = platformBadge(s);
+          const handoffTag = handoffMeta
+            ? `<span class="handoff-tag ${handoffMeta.tagClass}" title="${escapeHtml(handoffMeta.title)}">${escapeHtml(handoffMeta.label)}</span>`
+            : '';
+          let aiState = String(s.ai_takeover_state || (s.shop_ai_takeover_enabled ? 'active' : 'shadow'));
+          // 人工已接待：后端停止 AI 回复后，按钮不得再显示为 AI接待中（与后端大脑保持一致）。
+          const humanTookOver = !!s.handoff && (String(s.handoff_reason || '').trim() === 'human_customer_service_reply' || String(s.handoff_reason || '').trim() === 'human_manual_reply');
+          const aiHumanNote = aiState === 'active' && humanTookOver;
+          if (aiHumanNote) aiState = 'closed';
+          const aiStateControl = aiState === 'shadow'
+            ? '<span class="ai-state-label shadow" title="该店铺未开启 AI 自动接待，仅生成影子回复">AI影子中</span>'
+            : `<button class="ai-state-btn ${escapeHtml(aiState)}" type="button" data-enabled="${aiState === 'active' ? '1' : '0'}" title="${aiHumanNote ? '人工已接待，AI 自动回复已停止；点击可重新开启 AI' : (aiState === 'active' ? '点击关闭该会话 AI 接待' : '点击开启该会话 AI 接待')}">${aiState === 'active' ? 'AI接待中' : (aiState === 'handoff' ? 'AI已暂停' : 'AI已关闭')}</button>`;
+          parts.push(`<div class="sess ${active}${handoffMeta ? ` ${handoffMeta.rowClass}` : ''}" data-buyer="${escapeHtml(s.buyer_id)}" data-account="${escapeHtml(s.account)}">
+          <div class="avatar">${escapeHtml(avatarText(s.nickname || s.buyer_id))}</div>
+          <div class="mid">
+            <div class="name-row">
+              <div class="name">${escapeHtml(s.nickname || s.buyer_id)}</div>
+              <span class="${pb.cls}" title="${escapeHtml(pb.label)}">${escapeHtml(pb.text)}</span>
+              ${handoffTag}
+            </div>
+            <div class="preview">[${role}] ${escapeHtml(s.display_last_content || s.last_content || '')}</div>
+          </div>
+          <div class="right-col">
+            <div class="time">${fmtTime(s.last_ts)}</div>
+            ${badge}
+            ${aiStateControl}
+          </div>
+        </div>`);
+        });
+      }
+      box.innerHTML = parts.join('');
+      box.querySelectorAll('.sess').forEach(el => {
+        el.onclick = async () => {
+          if (DOCK_MODE) {
+            // 节流：800ms 内的重复点击忽略，防止迟到指令互相覆盖
+            if (Date.now() < (window.__jumpBusyUntil || 0)) { return; }
+            window.__jumpBusyUntil = Date.now() + 900;
+            // 秒跳：跳转请求立即发出，不等待会话详情加载；详情转后台加载。
+            jumpDockSession(el.dataset.buyer, el.dataset.account);
+            openSession(el.dataset.buyer, el.dataset.account, { background: true }).catch(() => {});
+            return;
+          }
+          await openSession(el.dataset.buyer, el.dataset.account);
+        };
+      });
+      box.querySelectorAll('.ai-state-btn').forEach(button => {
+        button.onclick = async event => {
+          event.stopPropagation();
+          const row = button.closest('.sess');
+          if (!row) return;
+          const session = sessionsCache.find(item =>
+            String(item.buyer_id || '') === String(row.dataset.buyer || '') &&
+            String(item.account || '') === String(row.dataset.account || '')
+          );
+          await toggleAiForSession(session, button);
+        };
+      });
+    }
+
+    async function toggleAiForSession(session, button) {
+      if (!session || button?.disabled) return;
+      const enabled = button?.dataset.enabled !== '1';
+      if (button) {
+        button.disabled = true;
+        button.textContent = enabled ? '开启中' : '关闭中';
+      }
+      try {
+        const result = await fetchJSON('/api/session/state', {
+          method: 'POST',
+          body: JSON.stringify({
+            account: session.account,
+            buyer_id: session.buyer_id,
+            ai_takeover_enabled: enabled,
+            reason: enabled ? '客服手动开启 AI 接待' : '客服手动关闭 AI 接待',
+          }),
+        });
+        Object.assign(session, {
+          ai_takeover_enabled: result.ai_takeover_enabled ?? enabled,
+          ai_takeover_override: result.ai_takeover_override ?? enabled,
+          ai_takeover_state: result.ai_takeover_state || (enabled ? 'active' : 'paused'),
+          handoff: result.handoff ?? (enabled ? false : session.handoff),
+          handoff_reason: result.handoff_reason ?? (enabled ? '' : session.handoff_reason),
+        });
+        toast(enabled ? '已开启该会话的 AI 接待' : '已关闭该会话的 AI 接待');
+        currentListSignature = '';
+        await refreshSessions();
+      } catch (error) {
+        if (button) {
+          button.disabled = false;
+          button.textContent = enabled ? 'AI已关闭' : 'AI接待中';
+        }
+        toast(error.message || (enabled ? '开启 AI 失败' : '关闭 AI 失败'));
+      }
+    }
+
+    async function jumpDockSession(buyerId, account) {
+      const session = sessionsCache.find(item =>
+        String(item.buyer_id || '') === String(buyerId || '') &&
+        String(item.account || '') === String(account || '')
+      ) || {buyer_id: buyerId, account};
+      // 秒跳旁路：本地 CDP 助手（127.0.0.1:18769）优先；不可用自动回退网关跳转
+      try {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 3500);
+        const csId = String((session.account || account || '')).replace(/:/g, '_');
+        const helperUrl = 'http://127.0.0.1:18769/jump?uid=' + encodeURIComponent(String(session.buyer_id || buyerId || '')) + '&nick=' + encodeURIComponent(String(session.nickname || '')) + '&cs=' + encodeURIComponent(csId) + '&shop=' + encodeURIComponent(String(session.shop_name || '')) + '&acct=' + encodeURIComponent(String(session.account || account || '')) + '&t=' + Date.now();
+        const hr = await fetch(helperUrl, { signal: ac.signal });
+        clearTimeout(timer);
+        if (hr.ok) {
+          const hj = await hr.json().catch(() => ({}));
+          if (hj && hj.ok) { toast('已秒切官方会话（' + (hj.ms || '?') + 'ms）'); return; }
+          toast('[旁路]ok=false reason=' + ((hj && hj.reason) || '?'));
+        } else {
+          toast('[旁路]HTTP ' + hr.status);
+        }
+      } catch (eBypass) {
+        if ((eBypass && eBypass.name) === 'AbortError') { toast('[旁路]助手忙，已跳过本次慢速回退'); return; }
+        toast('[旁路]' + ((eBypass && eBypass.message) || '异常') + '，走网关跳转');
+      }
+      try {
+        const result = await fetchJSON('/api/queue/jump', {
+          method: 'POST',
+          body: JSON.stringify({
+            account: session.account || account,
+            buyer_id: session.buyer_id || buyerId,
+            shop_id: session.shop_id || shopIdFromAccount(session.account || account),
+            nick: session.nickname || '',
+          }),
+        });
+        toast(result.hint || '已请求打开拼多多买家会话');
+      } catch (error) {
+        toast(error.message || '打开拼多多买家会话失败');
+      }
+    }
+
+    async function openSession(buyerId, account, options = {}) {
+      const normalizedAccount = account || '';
+      const sessionChanged = currentBuyer !== buyerId || (currentAccount || '') !== normalizedAccount;
+      const requestId = ++sessionRequestSerial;
+      currentBuyer = buyerId;
+      currentAccount = normalizedAccount;
+      $('replyText').disabled = false;
+      $('btnSend').disabled = replyBusy;
+      syncManualSendUI();
+      $('btnExportSession').disabled = false;
+      $('btnOpenWorkbench').disabled = false;
+      if (!options.background) {
+        setView('chat');
+        if (sessionChanged) {
+          selectedMessageId = '';
+          currentMessageEntries = [];
+          currentShadowByParent = new Map();
+          currentQuestionRefById = new Map();
+          currentLoadedMessages = [];
+          currentMessageTotal = 0;
+          currentMaxSequence = 0;
+          currentHasMoreMessages = false;
+          currentNextBefore = null;
+          $('chatTitle').textContent = '加载中…';
+          $('chatMeta').textContent = `${buyerId} · ${shopDisplayName(shopIdFromAccount(normalizedAccount), normalizedAccount)}`;
+          $('messages').innerHTML = '<div class="empty">正在读取聊天记录…</div>';
+          renderInspector(null);
+          renderList(); // 立即高亮左侧选中项
+        }
+      }
+    
+      const detailQuery = new URLSearchParams({
+        account: normalizedAccount,
+        timeline: '1',
+        limit: String(SESSION_INITIAL_MESSAGE_LIMIT),
+      });
+      if(options.loadOlder && options.before)detailQuery.set('before',String(options.before));
+      if(options.background && currentMaxSequence > 0){
+        detailQuery.set('after', String(Math.max(0, currentMaxSequence - SESSION_DELTA_OVERLAP)));
+        detailQuery.set('limit', String(SESSION_DELTA_OVERLAP + 25));
+      }
+      const data = await fetchJSON(`/api/session/${encodeURIComponent(buyerId)}?${detailQuery}`);
+      if (requestId !== sessionRequestSerial || currentBuyer !== buyerId || (currentAccount || '') !== normalizedAccount) return;
+    
+      const cachedSession = sessionsCache.find(item =>
+        item.buyer_id === buyerId && (item.account || '') === normalizedAccount
+      );
+      // 三段式下选中即已在看对话，清理未读
+      const shouldClearUnread = !options.loadOlder && (!options.background || Number(cachedSession?.unread || 0) > 0);
+      if (shouldClearUnread) {
+        if (cachedSession) cachedSession.unread = 0;
+        fetchJSON('/api/clear_unread', {
+          method: 'POST', body: JSON.stringify({ buyer_id: buyerId, account: normalizedAccount })
+        }).catch(error => console.warn('clear unread', error));
+      }
+      if (requestId !== sessionRequestSerial || currentBuyer !== buyerId || (currentAccount || '') !== normalizedAccount) return;
+    
+      $('chatTitle').textContent = data.nickname || data.buyer_id;
+      const shop = data.shop_name || shopDisplayName(data.shop_id || shopIdFromAccount(data.account || normalizedAccount), data.account || normalizedAccount);
+      const plat = platformLabel(data);
+      const box = $('messages');
+      const inspector = $('inspectorContent');
+      const incoming = data.messages || [];
+      const maxSequenceBeforeMerge = currentMaxSequence;
+      if (data.message_total !== undefined && data.message_total !== null) {
+        currentMessageTotal = Number(data.message_total || 0);
+      } else if (data.delta) {
+        const newSequences = new Set(incoming
+          .map(message => Number(message._sequence || message.sequence || 0))
+          .filter(sequence => sequence > maxSequenceBeforeMerge));
+        currentMessageTotal += newSequences.size;
+      } else if (!currentMessageTotal) {
+        currentMessageTotal = Number(data.msg_count ?? incoming.length);
+      }
+      $('chatMeta').textContent = `${plat} · ${shop} · ${data.buyer_id} · ${currentMessageTotal} 条`;
+      let msgs = incoming;
+      if(options.loadOlder){
+        msgs = mergeTimelineMessages(incoming, currentLoadedMessages);
+        currentHasMoreMessages = !!data.has_more;
+        currentNextBefore = data.next_before || null;
+      }else if(data.delta){
+        msgs = mergeTimelineMessages(currentLoadedMessages, incoming);
+      }else if(!sessionChanged && currentLoadedMessages.length>incoming.length){
+        msgs = mergeTimelineMessages(currentLoadedMessages, incoming);
+      }else{
+        currentHasMoreMessages = !!data.has_more;
+        currentNextBefore = data.next_before || null;
+      }
+      currentLoadedMessages = msgs;
+      currentMaxSequence = Math.max(
+        0,
+        ...msgs.map(message => Number(message._sequence || message.sequence || 0)),
+      );
+      const signature = sessionSignature(msgs);
+      const shouldRender = sessionChanged || options.force || signature !== currentSessionSignature;
+    
+      if (!shouldRender) {
+        renderList();
+        return;
+      }
+    
+      const previousScrollTop = box.scrollTop;
+      const previousScrollHeight = box.scrollHeight;
+      const distanceFromBottom = Math.max(0, box.scrollHeight - box.scrollTop - box.clientHeight);
+      const wasNearBottom = distanceFromBottom < 80;
+      const inspectorScrollTop = inspector.scrollTop;
+      const inspectorDetailStates = new Map(
+        Array.from(inspector.querySelectorAll('details[data-detail-key]')).map(el => [el.dataset.detailKey, el.open])
+      );
+      const previouslySelected = selectedMessageId;
+    
+      rebuildCurrentMessageIndexes();
+    
+      if (!msgs.length) {
+        selectedMessageId = '';
+        box.innerHTML = '<div class="empty">暂无消息</div>';
+        renderInspector(null);
+      } else {
+        const olderButton = currentHasMoreMessages
+          ? '<div class="load-older-wrap"><button class="btn ghost compact" id="loadOlderMessages" type="button">加载更早消息</button></div>'
+          : '';
+        box.innerHTML = olderButton + currentMessageEntries.map(({ message: m, key }) => {
+          const simulated = m.role === 'assistant_simulated' || m.delivery_status === 'simulated';
+          const cls = m.role === 'user' ? 'user' : (simulated ? 'assistant_simulated' : 'mall_cs');
+          const who = m.role === 'user' ? (m.nickname || '买家') : (simulated ? '模拟AI' : staffRoleLabel(m, '客服'));
+          let delivery = '';
+          if (m.delivery_status === 'accepted') {
+            delivery = (m.error && /粘贴|千牛/.test(String(m.error)))
+              ? ' · 已粘贴到千牛(请看气泡)'
+              : ' · 已提交待确认';
+          } else if (m.delivery_status === 'confirmed') {
+            delivery = ' · 已确认发出';
+          } else if (m.delivery_status === 'indeterminate') {
+            delivery = ' · 已提交，未确认买家是否收到';
+          } else if (m.delivery_status === 'dry_run') {
+            delivery = ' · 仅模拟未真发';
+          } else if (m.delivery_status === 'failed') {
+            delivery = ' · 发送失败';
+          }
+          const child = m.role === 'user' && m.msg_id ? currentShadowByParent.get(m.msg_id) : null;
+          const childStatus = child?.shadow_status || '';
+          const regenerateMsgId = simulated ? shadowRegenerateMessageId(m) : '';
+          let action = '';
+          if (m.role === 'user' && !child) {
+            action = `<div class="shadow-actions"><button class="shadow-run" data-shadow-msg="${escapeHtml(m.msg_id)}" type="button">生成模拟AI + 白盒</button></div>`;
+          } else if (simulated && regenerateMsgId) {
+            const generating = m.shadow_status === 'running' || m.shadow_status === 'queued';
+            action = `<div class="shadow-actions"><button class="shadow-run" data-shadow-msg="${escapeHtml(regenerateMsgId)}" type="button" ${generating ? 'disabled' : ''}>${generating ? '影子AI生成中…' : '重新生成模拟AI + 白盒'}</button></div>`;
+          }
+          const questionLabel = messageQuestionLabel(m);
+          const questionBadge = questionLabel ? `<span class="message-ref">${escapeHtml(questionLabel)}</span>` : '';
+          const latencyTag = simulated ? renderShadowLatencyTag(m) : '';
+          const hint = simulated ? '<div class="inspect-hint">已生成白盒 · 点击右侧查看详细过程 →</div>' : (m.role === 'user' && child ? '<div class="inspect-hint">已关联模拟 AI · 点击查看白盒 →</div>' : '<div class="inspect-hint">点击查看消息详情 →</div>');
+          const productCard = m.role === 'user' ? renderConsultedProductCard(m, child) : '';
+          return `<div class="bubble-row ${cls}" data-message-key="${escapeHtml(key)}" tabindex="0" role="button" aria-selected="false"><div class="bubble ${cls}">
+            <div class="meta"><span>${escapeHtml(who)} · ${fmtTime(m.ts)}${delivery}</span>${questionBadge}${latencyTag}</div>
+            <div class="msg-text">${escapeHtml(m.display_content || m.content)}</div>
+            ${productCard}
+            ${action}
+            ${hint}
+          </div></div>`;
+        }).join('');
+    
+        box.querySelectorAll('.consult-product-link').forEach(link => {
+          link.onclick = event => event.stopPropagation();
+        });
+        const older = $('loadOlderMessages');
+        if(older)older.onclick=async()=>{older.disabled=true;older.textContent='加载中…';try{await openSession(currentBuyer,currentAccount,{loadOlder:true,before:currentNextBefore});}catch(error){toast(error.message);older.disabled=false;older.textContent='加载更早消息';}};
+        box.querySelectorAll('.shadow-run').forEach(btn => {
+          btn.onclick = event => {
+            event.stopPropagation();
+            selectMessage(btn.closest('.bubble-row')?.dataset.messageKey || '');
+            runShadow(btn.dataset.shadowMsg, btn);
+          };
+        });
+        box.querySelectorAll('.bubble-row[data-message-key]').forEach(row => {
+          row.onclick = () => selectMessage(row.dataset.messageKey);
+          row.onkeydown = event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              selectMessage(row.dataset.messageKey);
+            }
+          };
+        });
+    
+        let nextSelected = previouslySelected && currentMessageEntries.some(entry => entry.key === previouslySelected)
+          ? previouslySelected
+          : '';
+        if (!nextSelected) {
+          const latestSimulated = [...currentMessageEntries].reverse().find(entry =>
+            entry.message.role === 'assistant_simulated' || entry.message.delivery_status === 'simulated'
+          );
+          nextSelected = latestSimulated?.key || currentMessageEntries[currentMessageEntries.length - 1].key;
+        }
+        const preserveInspector = !sessionChanged && nextSelected === previouslySelected;
+        selectMessage(nextSelected, {
+          preserveScroll: preserveInspector,
+          scrollTop: inspectorScrollTop,
+          detailStates: preserveInspector ? inspectorDetailStates : new Map()
+        });
+      }
+    
+      currentSessionSignature = signature;
+      if(options.loadOlder){
+        box.scrollTop = Math.max(0, box.scrollHeight - previousScrollHeight + previousScrollTop);
+      } else if (sessionChanged || wasNearBottom) {
+        box.scrollTop = box.scrollHeight;
+      } else {
+        box.scrollTop = previousScrollTop;
+      }
+      renderList();
+    }
+
+    async function submitCorrection(event, form) {
+      event.preventDefault();
+      if (typeof hasPerm === 'function' && !hasPerm('capabilities.corrections')) {
+        return toast('当前角色不能纠错（请使用质检/班长/店长账号）');
+      }
+      if (!currentBuyer || !form?.dataset?.correctionMsg) return toast('\u7f3a\u5c11\u7ea0\u6b63\u5bf9\u8c61');
+      const values = new FormData(form);
+      const expected = String(values.get('expected_reply') || '').trim();
+      if (!expected) return toast('\u8bf7\u5148\u586b\u5199\u6b63\u786e\u56de\u590d');
+      const button = form.querySelector('.correction-submit');
+      if (button) {
+        button.disabled = true;
+        button.textContent = '\u6b63\u5728\u4fdd\u5b58\u2026';
+      }
+      try {
+        const res = await fetchJSON('/api/shadow/correct', {
+          method: 'POST',
+          body: JSON.stringify({
+            buyer_id: currentBuyer,
+            account: currentAccount,
+            msg_id: form.dataset.correctionMsg,
+            expected_reply: expected,
+            error_type: String(values.get('error_type') || 'other'),
+            error_detail: String(values.get('error_detail') || '').trim(),
+            apply_scope: String(values.get('apply_scope') || 'shop'),
+            correction_action: String(values.get('correction_action') || 'auto'),
+            direct_send: false
+          })
+        });
+        toast(`\u5df2\u4fdd\u5b58\u4e3a\u5f85\u5ba1\u6838\u7ea0\u6b63\uff1a${res.correction?.id || ''}`);
+        await openSession(currentBuyer, currentAccount, { force: true });
+      } catch (e) {
+        toast('\u7ea0\u6b63\u4fdd\u5b58\u5931\u8d25\uff1a' + e.message);
+        if (button) {
+          button.disabled = false;
+          button.textContent = '\u4fdd\u5b58\u4e3a\u5f85\u5ba1\u6838\u7ea0\u6b63';
+        }
+      }
+    }
+
+    async function runShadow(msgId, button) {
+      if (!currentBuyer || !msgId) return toast('请先选择买家消息');
+      if (button) {
+        button.disabled = true;
+        button.textContent = '影子AI生成中…';
+      }
+      try {
+        const res = await fetchJSON('/api/shadow/run', {
+          method: 'POST',
+          body: JSON.stringify({ buyer_id: currentBuyer, account: currentAccount, msg_id: msgId })
+        });
+        toast(res.status === 'already_queued'
+          ? '该消息已在生成队列中'
+          : (ownAutoSendEnabled ? '已提交生成；通过安全检查后将按白名单发送' : '已提交本地影子生成，不会发送给买家'));
+        setTimeout(() => openSession(currentBuyer, currentAccount), 250);
+      } catch (e) {
+        toast('影子生成提交失败：' + e.message);
+        if (button) {
+          button.disabled = false;
+          button.textContent = '生成模拟AI + 白盒';
+        }
+      }
+    }
+
+    async function sendReply(text, opts = {}) {
+      if (!currentBuyer) return toast('请先选择会话');
+      const content = (text ?? $('replyText').value).trim();
+      if (!content) return;
+      const runShadow = opts.runShadow !== false;
+      const manualDirect = opts.manualDirect === true;
+      if (manualDirect) {
+        const row = currentShopBrainState();
+        if (!row || !row.manual_send_armed) {
+          syncManualSendUI();
+          return toast('当前店铺尚未开启人工直发，或授权已经过期');
+        }
+        const shopName = row.shop_name || shopDisplayName(row.shop_id, currentAccount);
+        const session = sessionsCache.find(item => item.buyer_id === currentBuyer && item.account === currentAccount);
+        const buyerName = session?.nickname && session.nickname !== currentBuyer
+          ? `${session.nickname}（${currentBuyer}）` : currentBuyer;
+        const preview = content.length > 160 ? content.slice(0, 160) + '…' : content;
+        const confirmed = window.confirm(
+          `确认真实发送？
+
+店铺：${shopName}
+买家：${buyerName}
+
+回复内容：
+${preview}
+
+点击“确定”后将立即通过探域发送能力提交给真实买家。`
+        );
+        if (!confirmed) return;
+      }
+      replyBusy = true;
+      $('btnSend').disabled = true;
+      syncManualSendUI();
+      try {
+        if (manualDirect) {
+          let res;
+          try {
+            res = await fetchJSON('/api/reply', {
+              method: 'POST',
+              body: JSON.stringify({ buyer_id: currentBuyer, account: currentAccount, content, manual_direct: true })
+            });
+          } catch (e) {
+            // fetchJSON throws on non-2xx; body error_user is preferred when present
+            toast('人工回复失败：' + (e.message || 'unknown'));
+            return;
+          }
+          if (res.ok) {
+            const viaMap = { bridge: '千牛Bridge', dll: '拼多多DLL', qn_dll: '探域千牛DLL', ui_paste: '千牛窗口粘贴', dry_run: '仅模拟' };
+            const via = viaMap[res.via] || res.via || '通道';
+            const note = res.note ? ` · ${res.note}` : '';
+            toast(`已提交（${via}），对话已更新${note}`);
+            $('replyText').value = '';
+            // force re-render so self-send bubble appears even if list cache is stale
+            await refreshSessions().catch(() => {});
+            await openSession(currentBuyer, currentAccount, { force: true });
+            // bridge async: refresh again after agent reports real/dry_run/ui
+            if (res.via === 'bridge') {
+              setTimeout(() => { if (currentBuyer) openSession(currentBuyer, currentAccount, { force: true }); }, 2500);
+              setTimeout(() => { if (currentBuyer) openSession(currentBuyer, currentAccount, { force: true }); }, 5500);
+            }
+          } else {
+            toast('人工回复失败：' + (res.error_user || res.error || 'unknown'));
+          }
+        } else if (sendMode === 'observe') {
+          // 模拟咨询：注入买家消息 + 默认自动跑影子 AI / 白盒
+          // new_episode 默认 true；勾选「接着上文」时为 false
+          const continuePrev = !!( $('consultContinue') && $('consultContinue').checked );
+          const newEpisode = !continuePrev;
+          const res = await fetchJSON('/api/simulate_consult', {
+            method: 'POST',
+            body: JSON.stringify({
+              buyer_id: currentBuyer,
+              account: currentAccount,
+              content,
+              run_shadow: runShadow,
+              new_episode: newEpisode,
+              nickname: '模拟买家',
+            })
+          });
+          if (res.ok) {
+            const epTip = newEpisode ? '新开咨询段' : '接着上文';
+            toast(runShadow
+              ? `已模拟咨询（${epTip}），影子AI生成中`
+              : `已注入买家消息（${epTip}，未跑 AI）`);
+            $('replyText').value = '';
+            await openSession(currentBuyer, currentAccount);
+            // 生成中时稍后再刷一次，拉到白盒结果
+            if (runShadow) {
+              setTimeout(() => {
+                if (currentBuyer) openSession(currentBuyer, currentAccount);
+              }, 1200);
+              setTimeout(() => {
+                if (currentBuyer) openSession(currentBuyer, currentAccount);
+              }, 3200);
+            }
+          } else {
+            toast('模拟咨询失败: ' + (res.error || 'unknown'));
+          }
+        } else {
+          const res = await fetchJSON('/api/reply', {
+            method: 'POST',
+            body: JSON.stringify({ buyer_id: currentBuyer, account: currentAccount, content })
+          });
+          if (res.ok) {
+            toast(res.via === 'bridge' ? '已提交千牛Bridge，已写入当前对话' : '已提交，等待 DLL 回执');
+            $('replyText').value = '';
+            await refreshSessions().catch(() => {});
+            await openSession(currentBuyer, currentAccount, { force: true });
+          } else {
+            toast('提交失败: ' + (res.error_user || res.error || 'unknown'));
+          }
+        }
+      } catch (e) {
+        toast((manualDirect ? '人工回复异常: ' : (sendMode === 'observe' ? '模拟咨询异常: ' : '发送异常: ')) + e.message);
+      } finally {
+        replyBusy = false;
+        $('btnSend').disabled = !currentBuyer;
+        syncManualSendUI();
+      }
+    }
+
+    async function enableOwnBrainTakeover() {
+      if (typeof window.openShopBrainSettings !== 'function') {
+        return toast('店铺管理尚未加载，请刷新页面后重试');
+      }
+      try {
+        await window.openShopBrainSettings();
+      } catch (e) {
+        toast('打开店铺大脑设置失败：' + e.message);
+      }
+    }
+
+    async function toggleBrainRealSend() {
+      const enabled = !!ownAutoSendEnabled;
+      if (!enabled) return enableOwnBrainTakeover();
+      if (!window.confirm('立即停止全部店铺的 AI 回复？\n影子回复仍会继续生成。')) return;
+      try {
+        await fetchJSON('/api/brain/send-toggle', {method:'POST',body:JSON.stringify({enabled:false})});
+        toast('已停止全部 AI 回复，继续生成影子回复');
+        await refreshStatus();
+      } catch (e) { toast('切换失败：' + e.message); }
+    }
+
+    if ($('btnBrainTakeover')) $('btnBrainTakeover').onclick = enableOwnBrainTakeover;
+    if ($('btnBrainSendToggle')) $('btnBrainSendToggle').onclick = toggleBrainRealSend;
+    window.addEventListener('ai-reply-state-changed', () => { refreshStatus().catch(() => {}); });
+
+    // page navigation and exports
+    if ($('btnBack')) {
+      $('btnBack').onclick = () => {
+        // 三段式下返回仅取消选中
+        currentBuyer = '';
+        currentAccount = '';
+        selectedMessageId = '';
+        currentMessageEntries = [];
+        currentLoadedMessages = [];
+        currentMessageTotal = 0;
+        currentMaxSequence = 0;
+        currentSessionSignature = '';
+        $('chatTitle').textContent = '未选择会话';
+        $('chatMeta').textContent = '在左侧选择买家会话';
+        $('messages').innerHTML = '<div class="empty">从左侧选择会话后，消息会显示在这里</div>';
+        $('replyText').disabled = true;
+        $('btnSend').disabled = true;
+        $('btnQuick').disabled = true;
+        syncManualSendUI();
+        $('btnExportSession').disabled = true;
+        $('btnOpenWorkbench').disabled = true;
+        renderInspector(null);
+        setView('workbench');
+        renderList();
+      };
+    }
+    $('btnExportSession').onclick = () => {
+      if (!currentBuyer) return toast('\u8bf7\u5148\u9009\u62e9\u4f1a\u8bdd');
+      downloadExport(
+        '/api/export/session',
+        { buyer_id: currentBuyer, account: currentAccount },
+        `chat_${currentBuyer}.txt`,
+        $('btnExportSession')
+      );
+    };
+    $('btnExportAll').onclick = () => downloadExport(
+      '/api/export/all', {}, `all_chats_${Date.now()}.zip`, $('btnExportAll')
+    );
+
+    // toolbar
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.onclick = async () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        filterMode = tab.dataset.filter;
+        sessionPage = 1;
+        currentListSignature = '';
+        await refreshSessions();
+      };
+    });
+    $('search').oninput = () => {
+      clearTimeout(sessionSearchTimer);
+      sessionSearchTimer = setTimeout(async () => {
+        sessionPage = 1;
+        currentListSignature = '';
+        await refreshSessions().catch(() => {});
+      }, 280);
+    };
+    $('sessionPrev').onclick = async () => {
+      if (sessionPage <= 1) return;
+      sessionPage -= 1; currentListSignature = ''; await refreshSessions();
+    };
+    $('sessionNext').onclick = async () => {
+      if (sessionPage >= sessionPages) return;
+      sessionPage += 1; currentListSignature = ''; await refreshSessions();
+    };
+    $('btnRefresh').onclick = async () => {
+      await refreshSessions();
+      await refreshStatus();
+      if (currentBuyer) await openSession(currentBuyer, currentAccount);
+      toast('已刷新');
+    };
+    $('btnSend').onclick = () => sendReply(undefined, { runShadow: true });
+    $('btnQuick').onclick = () => sendReply(undefined, { manualDirect: true });
+    $('manualSendToggle').addEventListener('change', event => setManualDirectSend(!!event.target.checked));
+    const consultQuick = $('consultQuick');
+    if (consultQuick) {
+      consultQuick.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-consult]');
+        if (!btn) return;
+        const text = btn.getAttribute('data-consult') || '';
+        if (!text) return;
+        $('replyText').value = text;
+        sendReply(text, { runShadow: true });
+      });
+    }
+    $('replyText').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        sendReply(undefined, { runShadow: true });
+      }
+    });
+    $('btnOpenWorkbench').onclick = async () => {
+      if (!currentBuyer) return toast('请先选择会话');
+      // 尝试调探域 open_customer_dialog（若桌面桥支持）
+      const r = await callDesktop('open_conversation', currentBuyer, currentAccount);
+      if (!r) toast('已选中会话（工作台内手动打开亦可）');
+    };
+
+    // window chrome
+    $('btnPin').onclick = async () => {
+      pinOn = !pinOn;
+      $('btnPin').classList.toggle('active', pinOn);
+      if (DOCK_MODE) await setDockControl({ pin: pinOn });
+      else await callDesktop('set_pin', pinOn);
+      toast(pinOn ? '已置顶' : '取消置顶');
+    };
+    $('btnAdsorb').onclick = async () => {
+      adsorbOn = !adsorbOn;
+      $('btnAdsorb').classList.toggle('active', adsorbOn);
+      if (DOCK_MODE) await setDockControl({ adsorb: adsorbOn });
+      else await callDesktop('set_adsorb', adsorbOn);
+      toast(adsorbOn ? '吸附开启：贴拼多多工作台/屏幕边缘' : '吸附关闭');
+    };
+    $('btnMin').onclick = async () => {
+      if (desktop) {
+        await callDesktop('collapse');
+      } else {
+        document.body.classList.add('collapsed');
+      }
+    };
+    $('btnClose').onclick = async () => {
+      if (desktop) await callDesktop('close');
+      else window.close();
+    };
+    $('strip').onclick = async () => {
+      document.body.classList.remove('collapsed');
+      await callDesktop('expand');
+    };
+
+    // defaults for desktop buttons
+    $('btnPin').classList.add('active');
+    $('btnAdsorb').classList.add('active');
+    refreshDockControl();
+
+    async function refreshCurrentSession(force = false) {
+      if (!currentBuyer) return;
+      if (backgroundSessionRefreshRunning) {
+        backgroundSessionRefreshQueued = true;
+        backgroundSessionRefreshForce = backgroundSessionRefreshForce || force;
+        return;
+      }
+      backgroundSessionRefreshRunning = true;
+      backgroundSessionRefreshForce = force;
+      try {
+        do {
+          backgroundSessionRefreshQueued = false;
+          const shouldForce = backgroundSessionRefreshForce;
+          backgroundSessionRefreshForce = false;
+          const buyerId = currentBuyer;
+          const account = currentAccount;
+          const ta = $('replyText');
+          const keep = ta.value;
+          const focused = document.activeElement === ta;
+          await openSession(buyerId, account, { background: true, force: shouldForce });
+          lastCurrentSessionRefreshAt = Date.now();
+          ta.value = keep;
+          if (focused) ta.focus();
+        } while (backgroundSessionRefreshQueued && currentBuyer);
+      } finally {
+        backgroundSessionRefreshRunning = false;
+      }
+    }
+
+    async function tick(options = {}) {
+      if (tickRunning) return;
+      if (RBAC_ENABLED && !authReady) return;
+      if (document.hidden && !options.force) return;
+      tickRunning = true;
+      try {
+        const now = Date.now();
+        if (options.forceStatus || now - lastStatusRefreshAt >= STATUS_REFRESH_INTERVAL_MS) {
+          await refreshStatus();
+          lastStatusRefreshAt = Date.now();
+        }
+        if ($('body').dataset.space !== 'capabilities') {
+          if (options.force || now - lastSessionListRefreshAt >= SESSION_LIST_REFRESH_INTERVAL_MS) {
+            await refreshSessions();
+            lastSessionListRefreshAt = Date.now();
+          }
+          if (
+            currentBuyer
+            && (options.force || now - lastCurrentSessionRefreshAt >= CURRENT_SESSION_REFRESH_INTERVAL_MS)
+          ) {
+            await refreshCurrentSession(!!options.force);
+          }
+        }
+      } catch (e) {
+        console.warn(e);
+      } finally {
+        tickRunning = false;
+      }
+    }
+
+    let seatEventSource = null;
+    let seatRefreshTimer = null;
+    let seatLastEventVersion = 0;
+
+    function connectSeatStream(){
+      if(!SEAT_MODE || !LOOPBACK_SEAT || !window.EventSource || seatEventSource) return;
+      const stream = new EventSource(apiUrl(`/api/seat/stream?after=${encodeURIComponent(seatLastEventVersion)}`));
+      seatEventSource = stream;
+      stream.addEventListener('seat-message', event => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          seatLastEventVersion = Math.max(seatLastEventVersion, Number(payload.version || event.lastEventId || 0));
+        } catch (_error) {
+          seatLastEventVersion = Math.max(seatLastEventVersion, Number(event.lastEventId || 0));
+        }
+        if(seatRefreshTimer) clearTimeout(seatRefreshTimer);
+        seatRefreshTimer = setTimeout(async () => {
+          try{
+            await refreshSessions();
+            lastSessionListRefreshAt = Date.now();
+            if(currentBuyer){
+              await refreshCurrentSession(true);
+            }
+          }catch(e){
+            console.warn('seat stream refresh', e);
+          }
+        }, 40);
+      });
+      stream.onerror = () => {
+        seatEventSource = null;
+        stream.close();
+        setTimeout(connectSeatStream, 500);
+      };
+    }
+
+    // pywebview ready
+    window.addEventListener('pywebviewready', () => {
+      desktop = true;
+      callDesktop('set_pin', true);
+      callDesktop('set_adsorb', true);
+    });
+
+    $('authLoginBtn')?.addEventListener('click', () => doLogin());
+    $('authPassword')?.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') doLogin(); });
+    $('authUsername')?.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('authPassword')?.focus(); });
+    $('btnAuthLogout')?.addEventListener('click', () => doLogout());
+    document.querySelectorAll('.mode-tab').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        if (btn.dataset.space === 'capabilities' && !hasPerm('capabilities.view')) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          toast('当前角色不能进入能力中心（一线客服仅会话工作台）');
+        }
+      }, true);
+    });
+
+    (async () => {
+      const ok = await ensureAuth();
+      if (ok) {
+        connectSeatStream();
+        tick();
+      }
+      setInterval(async () => {
+        if(SEAT_MODE && !authReady){
+          const ready = await ensureAuth();
+          if(ready){
+            connectSeatStream();
+            tick({ force: true, forceStatus: true });
+          }
+          return;
+        }
+        tick();
+      }, TICK_INTERVAL_MS);
+    })();
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) tick({ force: true, forceStatus: true });
+    });
+  </script>
+  <script src="/static/capabilities.js"></script>
+</body>
+</html>

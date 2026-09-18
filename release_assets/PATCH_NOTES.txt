@@ -1,0 +1,64 @@
+PddBridgeAgent 0.5.15 release notes
+
+2026-08-21 automatic PDD dock startup
+
+- The complete 0.5.15 customer package now includes PddAdsorbWindow.exe and its
+  configuration and manual start/stop scripts.
+- After the local PDD workbench is healthy, starting PddBridgeAgent.exe launches
+  the dock by default without blocking bridge startup.
+- The dock keeps its single-instance guard. Closing the bridge stops only the
+  dock instance started by that bridge process; PDD Workbench is not closed.
+- Set auto_start_with_bridge=false in pdd_adsorb_config.json to disable automatic
+  startup while retaining manual launch support.
+- Restored the existing originData-only seller-callback fallback when generic
+  embedded-JSON scanning also sees the inner payload; candidate deduplication
+  prevents a second event when both paths decode the same callback.
+
+2026-08-18 PDD business_message customer-service capture repair
+
+Root cause
+
+- The 0.5.14 seller-callback path depended on a single physical log line and a
+  regular-expression extraction of originData. Current PDD/探域 logs can put cmd
+  and originData on different physical lines and can JSON-encode originData as
+  an outer JSON string. Those valid candidates were therefore counted as
+  unmatched and never reached either delivery queue.
+- The center registration client also still reported its old hard-coded 0.1.0
+  value even when the bridge runtime reported 0.5.14.
+
+Repair
+
+- PDD business_message parsing now extracts embedded JSON from prefixed lines,
+  decodes at most three JSON-string layers, and recursively visits dict/list
+  values. Any object with SendContent, SellerId and BuyId/BuyerId becomes a
+  confirmed mall_cs message.
+- BuyId/BuyerId accepts JSON numbers and strings. SellerId cs_<mall>_<staff> is
+  normalized to cs_<mall>:<staff>. TimeStamp accepts seconds or milliseconds.
+- MsgId/MessageId is preferred. Without it, the same account, buyer, normalized
+  content and platform timestamp produce the same stable callback ID and
+  idempotency key in inside and inject logs.
+- Send_Seller_Msg_Failure is ignored. Cross-line candidates are bounded per log
+  source to 256 KiB and expire after two seconds.
+- Version is now 0.5.15 in bridge, bridge.agent and bridge.client registration;
+  heartbeat includes deterministic build_hash and parser profile
+  pdd-imws-v2-business-message.
+- Existing buyer parsing, deduplication, persistent queues, local-first delivery
+  and center upload remain on their previous paths. Qianniu files were not
+  changed.
+
+Baseline failure evidence (synthetic values only)
+
+The untouched 0.5.14 backup was run with a nested originData callback containing
+multiline/emoji/quoted text and a fictional long BuyId:
+
+  baseline_nested_mall_cs=0
+  baseline_split_part1=0
+  baseline_split_part2=0
+
+This establishes the pre-fix failure without exposing a real buyer, seat or chat.
+
+Safety
+
+- Tests are offline and use fictional identifiers/content.
+- No real buyer message was sent and no historical log was uploaded or replayed
+  to the production center.

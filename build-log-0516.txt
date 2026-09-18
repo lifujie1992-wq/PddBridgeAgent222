@@ -1,0 +1,425 @@
+﻿python.exe : 164 INFO: PyInstaller: 6.20.0, contrib hooks: 2026.5
+At D:\temp\PddBridgeAgent-v0.5.14-source\build_release.ps1:19 char:1
++ & $python -m PyInstaller `
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (164 INFO: PyIns...b hooks: 2026.5:String) [], 
+    RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+164 INFO: Python: 3.10.11
+184 INFO: Platform: Windows-10-10.0.26200-SP0
+184 INFO: Python environment: C:\Users\Administrator\AppData\Local\Programs\Python\Python31
+0
+185 INFO: wrote D:\temp\PddBridgeAgent-v0.5.14-source\build-spec-v0515-final\agent\PddBridg
+eAgent.spec
+199 INFO: Removing temporary files and cleaning cache in C:\Users\Administrator\AppData\Loc
+al\pyinstaller
+253 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\Administrator',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\python310.zip',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\DLLs',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\Pythonwin',
+ 'D:\\temp\\PddBridgeAgent-v0.5.14-source']
+3338 INFO: Appending 'datas' from .spec
+3338 INFO: checking Analysis
+3338 INFO: Building Analysis because Analysis-00.toc is non existent
+3338 INFO: Looking for Python shared library...
+3338 INFO: Using Python shared library: C:\Users\Administrator\AppData\Local\Programs\Pytho
+n\Python310\python310.dll
+3338 INFO: Running Analysis Analysis-00.toc
+3339 INFO: Target bytecode optimization level: 0
+3339 INFO: Initializing module dependency graph...
+3350 INFO: Initializing module graph hook caches...
+3442 INFO: Analyzing modules for base_library.zip ...
+4300 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\Administrator\\
+AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+4428 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+6356 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+9257 INFO: Caching module dependency graph...
+9293 INFO: Analyzing D:\temp\PddBridgeAgent-v0.5.14-source\run_pdd_client.py
+9857 INFO: Processing standard module hook 'hook-psutil.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_contri
+b\\stdhooks'
+9989 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\Administrator
+\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+10763 INFO: Processing standard module hook 'hook-numpy.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+11561 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+11802 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\Administra
+tor\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+13191 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\Administrato
+r\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+13533 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\
+\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstalle
+r\\hooks'
+13699 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\Administrator\\A
+ppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+14894 INFO: Processing standard module hook 'hook-clr.py' from 'C:\\Users\\Administrator\\A
+ppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\pythonnet\\_pyinstaller'
+15035 INFO: Processing standard module hook 'hook-clr_loader.py' from 'C:\\Users\\Administr
+ator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_c
+ontrib\\stdhooks'
+15224 INFO: Processing standard module hook 'hook-pycparser.py' from 'C:\\Users\\Administra
+tor\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_co
+ntrib\\stdhooks'
+15405 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\Administr
+ator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+15422 INFO: SetuptoolsInfo: initializing cached setuptools info...
+17338 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\Adm
+inistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\h
+ooks\\pre_safe_import_module'
+17345 INFO: Processing pre-find-module-path hook 'hook-distutils.py' from 'C:\\Users\\Admin
+istrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hoo
+ks\\pre_find_module_path'
+17795 INFO: Processing standard module hook 'hook-distutils.py' from 'C:\\Users\\Administra
+tor\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+17841 INFO: Processing standard module hook 'hook-distutils.util.py' from 'C:\\Users\\Admin
+istrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hoo
+ks'
+17953 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\Users\\Adminis
+trator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks
+'
+18009 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\Adm
+inistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\h
+ooks\\pre_safe_import_module'
+18221 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Us
+ers\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInst
+aller\\hooks\\pre_safe_import_module'
+18450 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\Admini
+strator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hook
+s\\pre_safe_import_module'
+18459 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating a
+lias to 'setuptools._vendor.jaraco'!
+18480 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from '
+C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\
+PyInstaller\\hooks'
+18522 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\
+Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyIn
+staller\\hooks\\pre_safe_import_module'
+18548 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\Adm
+inistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\h
+ooks\\pre_safe_import_module'
+18556 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creatin
+g alias to 'setuptools._vendor.backports'!
+18656 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users
+\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstall
+er\\hooks\\pre_safe_import_module'
+18665 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creatin
+g alias to 'setuptools._vendor.more_itertools'!
+19442 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\Adminis
+trator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks
+\\pre_safe_import_module'
+20354 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\Adminis
+trator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks
+\\pre_safe_import_module'
+20362 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias t
+o 'setuptools._vendor.wheel'!
+21156 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\User
+s\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstal
+ler\\hooks'
+24214 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\A
+dministrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller
+_hooks_contrib\\stdhooks'
+25105 INFO: Processing standard module hook 'hook-comtypes.client.py' from 'C:\\Users\\Admi
+nistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_ho
+oks_contrib\\stdhooks'
+25718 INFO: Processing pre-safe-import-module hook 'hook-win32com.py' from 'C:\\Users\\Admi
+nistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_ho
+oks_contrib\\pre_safe_import_module'
+25956 INFO: Processing standard module hook 'hook-win32com.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_con
+trib\\stdhooks'
+25973 INFO: Processing standard module hook 'hook-pythoncom.py' from 'C:\\Users\\Administra
+tor\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_co
+ntrib\\stdhooks'
+26095 INFO: Processing standard module hook 'hook-pywintypes.py' from 'C:\\Users\\Administr
+ator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_c
+ontrib\\stdhooks'
+26612 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\Users\\Administrator\\A
+ppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+26742 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\Users\\Administra
+tor\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+27416 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\Users\\Admi
+nistrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\ho
+oks'
+27813 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\Users\\Administr
+ator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_c
+ontrib\\stdhooks'
+28796 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\Adminis
+trator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks
+\\pre_find_module_path'
+28837 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+29333 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+29432 INFO: Processing module hooks (post-graph stage)...
+29449 WARNING: Hidden import "pycparser.lextab" not found!
+29449 WARNING: Hidden import "pycparser.yacctab" not found!
+30317 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\Users
+\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstall
+er\\hooks'
+31463 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+31480 INFO: Performing binary vs. data reclassification (1030 entries)
+36739 INFO: Looking for ctypes DLLs
+36777 WARNING: Library UIAutomationClient_VC140_X64.dll required via ctypes not found
+36787 WARNING: Library UIAutomationClient_VC140_X86.dll required via ctypes not found
+36851 INFO: Analyzing run-time hooks ...
+36855 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\Administrator\\A
+ppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthooks
+'
+36868 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\Administrator\\Ap
+pData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+36882 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\Administrator\\Ap
+pData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+36896 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\Administr
+ator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\
+rthooks'
+36907 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthoo
+ks'
+36918 INFO: Including run-time hook 'pyi_rth_pywintypes.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_contri
+b\\rthooks'
+36929 INFO: Including run-time hook 'pyi_rth_pythoncom.py' from 'C:\\Users\\Administrator\\
+AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_contrib
+\\rthooks'
+36963 INFO: Creating base_library.zip...
+36976 INFO: Looking for dynamic libraries
+41236 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\Administrator\\App
+Data\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\numpy.libs']
+41236 INFO: Extra DLL search directories (PATH): []
+43474 INFO: Warnings written to D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v0515-fina
+l\agent\PddBridgeAgent\warn-PddBridgeAgent.txt
+43549 INFO: Graph cross-reference written to D:\temp\PddBridgeAgent-v0.5.14-source\build-wo
+rk-v0515-final\agent\PddBridgeAgent\xref-PddBridgeAgent.html
+43639 INFO: checking PYZ
+43640 INFO: Building PYZ because PYZ-00.toc is non existent
+43640 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v05
+15-final\agent\PddBridgeAgent\PYZ-00.pyz
+44146 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v05
+15-final\agent\PddBridgeAgent\PYZ-00.pyz completed successfully.
+44179 INFO: checking PKG
+44179 INFO: Building PKG because PKG-00.toc is non existent
+44179 INFO: Building PKG (CArchive) PddBridgeAgent.pkg
+44241 INFO: Building PKG (CArchive) PddBridgeAgent.pkg completed successfully.
+44242 INFO: Bootloader C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\s
+ite-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+44242 INFO: checking EXE
+44243 INFO: Building EXE because EXE-00.toc is non existent
+44243 INFO: Building EXE from EXE-00.toc
+44243 INFO: Copying bootloader EXE to D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v051
+5-final\agent\PddBridgeAgent\PddBridgeAgent.exe
+44661 INFO: Copying icon to EXE
+44873 INFO: Copying 0 resources to EXE
+44873 INFO: Embedding manifest in EXE
+45078 INFO: Appending PKG archive to EXE
+45122 INFO: Fixing EXE headers
+45342 INFO: Building EXE from EXE-00.toc completed successfully.
+45351 INFO: checking COLLECT
+45351 INFO: Building COLLECT because COLLECT-00.toc is non existent
+45351 INFO: Removing dir D:\temp\PddBridgeAgent-v0.5.14-source\build-dist-v0515-final\agent
+\PddBridgeAgent
+45714 INFO: Building COLLECT COLLECT-00.toc
+47742 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+47760 INFO: Build complete! The results are available in: D:\temp\PddBridgeAgent-v0.5.14-so
+urce\build-dist-v0515-final\agent
+python.exe : 166 INFO: PyInstaller: 6.20.0, contrib hooks: 2026.5
+At D:\temp\PddBridgeAgent-v0.5.14-source\build_release.ps1:47 char:1
++ & $python -m PyInstaller `
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (166 INFO: PyIns...b hooks: 2026.5:String) [], 
+    RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+166 INFO: Python: 3.10.11
+185 INFO: Platform: Windows-10-10.0.26200-SP0
+186 INFO: Python environment: C:\Users\Administrator\AppData\Local\Programs\Python\Python31
+0
+187 INFO: wrote D:\temp\PddBridgeAgent-v0.5.14-source\build-spec-v0515-final\gateway\LocalS
+eatGateway.spec
+193 INFO: Removing temporary files and cleaning cache in C:\Users\Administrator\AppData\Loc
+al\pyinstaller
+237 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\Administrator',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\python310.zip',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\DLLs',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\Pythonwin',
+ 'D:\\temp\\PddBridgeAgent-v0.5.14-source']
+771 INFO: Appending 'datas' from .spec
+773 INFO: checking Analysis
+773 INFO: Building Analysis because Analysis-00.toc is non existent
+773 INFO: Looking for Python shared library...
+773 INFO: Using Python shared library: C:\Users\Administrator\AppData\Local\Programs\Python
+\Python310\python310.dll
+773 INFO: Running Analysis Analysis-00.toc
+773 INFO: Target bytecode optimization level: 0
+773 INFO: Initializing module dependency graph...
+775 INFO: Initializing module graph hook caches...
+797 INFO: Analyzing modules for base_library.zip ...
+1557 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\Administrator\\
+AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+1601 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+2700 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+3444 INFO: Caching module dependency graph...
+3484 INFO: Analyzing D:\temp\PddBridgeAgent-v0.5.14-source\run_frontend_service.py
+3769 INFO: Processing module hooks (post-graph stage)...
+3776 INFO: Performing binary vs. data reclassification (7 entries)
+3883 INFO: Looking for ctypes DLLs
+3884 INFO: Analyzing run-time hooks ...
+3885 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\Administrator\\App
+Data\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+3890 INFO: Creating base_library.zip...
+3908 INFO: Looking for dynamic libraries
+4070 INFO: Extra DLL search directories (AddDllDirectory): []
+4070 INFO: Extra DLL search directories (PATH): []
+4516 INFO: Warnings written to D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v0515-final
+\gateway\LocalSeatGateway\warn-LocalSeatGateway.txt
+4532 INFO: Graph cross-reference written to D:\temp\PddBridgeAgent-v0.5.14-source\build-wor
+k-v0515-final\gateway\LocalSeatGateway\xref-LocalSeatGateway.html
+4549 INFO: checking PYZ
+4549 INFO: Building PYZ because PYZ-00.toc is non existent
+4549 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v051
+5-final\gateway\LocalSeatGateway\PYZ-00.pyz
+4651 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v051
+5-final\gateway\LocalSeatGateway\PYZ-00.pyz completed successfully.
+4656 INFO: checking PKG
+4656 INFO: Building PKG because PKG-00.toc is non existent
+4656 INFO: Building PKG (CArchive) LocalSeatGateway.pkg
+4704 INFO: Building PKG (CArchive) LocalSeatGateway.pkg completed successfully.
+4705 INFO: Bootloader C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\si
+te-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+4705 INFO: checking EXE
+4705 INFO: Building EXE because EXE-00.toc is non existent
+4705 INFO: Building EXE from EXE-00.toc
+4706 INFO: Copying bootloader EXE to D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v0515
+-final\gateway\LocalSeatGateway\LocalSeatGateway.exe
+4816 INFO: Copying icon to EXE
+4876 INFO: Copying 0 resources to EXE
+4876 INFO: Embedding manifest in EXE
+4934 INFO: Appending PKG archive to EXE
+4970 INFO: Fixing EXE headers
+5157 INFO: Building EXE from EXE-00.toc completed successfully.
+5158 INFO: checking COLLECT
+5159 INFO: Building COLLECT because COLLECT-00.toc is non existent
+5160 INFO: Removing dir D:\temp\PddBridgeAgent-v0.5.14-source\build-dist-v0515-final\gatewa
+y\LocalSeatGateway
+5182 INFO: Building COLLECT COLLECT-00.toc
+5364 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+5366 INFO: Build complete! The results are available in: D:\temp\PddBridgeAgent-v0.5.14-sou
+rce\build-dist-v0515-final\gateway
+python.exe : 175 INFO: PyInstaller: 6.20.0, contrib hooks: 2026.5
+At D:\temp\PddBridgeAgent-v0.5.14-source\build_release.ps1:59 char:1
++ & $python -m PyInstaller `
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (175 INFO: PyIns...b hooks: 2026.5:String) [], 
+    RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+175 INFO: Python: 3.10.11
+192 INFO: Platform: Windows-10-10.0.26200-SP0
+193 INFO: Python environment: C:\Users\Administrator\AppData\Local\Programs\Python\Python31
+0
+193 INFO: wrote D:\temp\PddBridgeAgent-v0.5.14-source\build-spec-v0515-final\adsorb\PddAdso
+rbWindow.spec
+201 INFO: Removing temporary files and cleaning cache in C:\Users\Administrator\AppData\Loc
+al\pyinstaller
+223 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\Administrator',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\python310.zip',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\DLLs',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\win32\\lib',
+ 'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages
+\\Pythonwin',
+ 'D:\\temp\\PddBridgeAgent-v0.5.14-source']
+796 INFO: checking Analysis
+796 INFO: Building Analysis because Analysis-00.toc is non existent
+796 INFO: Looking for Python shared library...
+796 INFO: Using Python shared library: C:\Users\Administrator\AppData\Local\Programs\Python
+\Python310\python310.dll
+796 INFO: Running Analysis Analysis-00.toc
+796 INFO: Target bytecode optimization level: 0
+796 INFO: Initializing module dependency graph...
+798 INFO: Initializing module graph hook caches...
+824 INFO: Analyzing modules for base_library.zip ...
+1555 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\Administrator\\
+AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+1600 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\Administrat
+or\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+2548 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+3240 INFO: Caching module dependency graph...
+3277 INFO: Analyzing D:\temp\PddBridgeAgent-v0.5.14-source\pdd_adsorb_window.py
+3313 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\Administrator
+\\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks'
+3515 INFO: Processing standard module hook 'hook-psutil.py' from 'C:\\Users\\Administrator\
+\AppData\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\_pyinstaller_hooks_contri
+b\\stdhooks'
+3572 INFO: Processing module hooks (post-graph stage)...
+3577 INFO: Performing binary vs. data reclassification (1 entries)
+3578 INFO: Looking for ctypes DLLs
+3583 INFO: Analyzing run-time hooks ...
+3584 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\Administrator\\App
+Data\\Local\\Programs\\Python\\Python310\\lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+3588 INFO: Creating base_library.zip...
+3599 INFO: Looking for dynamic libraries
+3776 INFO: Extra DLL search directories (AddDllDirectory): []
+3776 INFO: Extra DLL search directories (PATH): []
+4296 INFO: Warnings written to D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v0515-final
+\adsorb\PddAdsorbWindow\warn-PddAdsorbWindow.txt
+4311 INFO: Graph cross-reference written to D:\temp\PddBridgeAgent-v0.5.14-source\build-wor
+k-v0515-final\adsorb\PddAdsorbWindow\xref-PddAdsorbWindow.html
+4325 INFO: checking PYZ
+4326 INFO: Building PYZ because PYZ-00.toc is non existent
+4326 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v051
+5-final\adsorb\PddAdsorbWindow\PYZ-00.pyz
+4421 INFO: Building PYZ (ZlibArchive) D:\temp\PddBridgeAgent-v0.5.14-source\build-work-v051
+5-final\adsorb\PddAdsorbWindow\PYZ-00.pyz completed successfully.
+4425 INFO: checking PKG
+4425 INFO: Building PKG because PKG-00.toc is non existent
+4425 INFO: Building PKG (CArchive) PddAdsorbWindow.pkg
+5806 INFO: Building PKG (CArchive) PddAdsorbWindow.pkg completed successfully.
+5808 INFO: Bootloader C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\si
+te-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+5808 INFO: checking EXE
+5808 INFO: Building EXE because EXE-00.toc is non existent
+5808 INFO: Building EXE from EXE-00.toc
+5809 INFO: Copying bootloader EXE to D:\temp\PddBridgeAgent-v0.5.14-source\build-dist-v0515
+-final\adsorb\PddAdsorbWindow.exe
+5877 INFO: Copying icon to EXE
+5915 INFO: Copying 0 resources to EXE
+5915 INFO: Embedding manifest in EXE
+5951 INFO: Appending PKG archive to EXE
+5984 INFO: Fixing EXE headers
+6163 INFO: Building EXE from EXE-00.toc completed successfully.
+6165 INFO: Build complete! The results are available in: D:\temp\PddBridgeAgent-v0.5.14-sou
+rce\build-dist-v0515-final\adsorb

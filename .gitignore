@@ -1,0 +1,31 @@
+# 构建产物
+build/
+build-*/
+dist/
+*_internal/
+*.exe
+*.spec
+
+# 运行数据 / 客户消息（绝不能上传）
+*.jsonl
+data/
+state/
+logs/
+*.log
+nul
+recovered_seat_local_state.json
+
+# 本机配置（含真实 token）
+bridge_config.json
+pdd_adsorb_config.json
+preview-*-smoke/
+parser_profile*.json
+
+# 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 大文件历史归档
+audit-baseline-latency/
+release_assets/*.zip

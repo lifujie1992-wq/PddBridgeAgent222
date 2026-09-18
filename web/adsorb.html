@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>拼多多聚合接待</title>
+  <style>
+    :root {
+      --bg: #0f172a; --card: #1e293b; --line: #334155; --text: #e2e8f0;
+      --muted: #94a3b8; --danger: #f97316; --ok: #22c55e; --brand: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+    header {
+      position: sticky; top: 0; z-index: 5;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 12px; background: #111827; border-bottom: 1px solid var(--line);
+    }
+    header h1 { margin: 0; font-size: 14px; font-weight: 700; }
+    header .sub { color: var(--muted); font-size: 11px; }
+    header button, header input {
+      border: 1px solid var(--line); background: #0b1220; color: var(--text);
+      border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    }
+    header button { cursor: pointer; background: #164e63; border-color: #0e7490; }
+    header button.ghost { background: transparent; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 999px; background: #7c2d12; color: #ffedd5;
+      font-size: 11px; font-weight: 700;
+    }
+    main { padding: 10px; display: grid; gap: 8px; }
+    .card {
+      border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+      padding: 10px 12px; cursor: pointer; transition: border-color .15s, transform .1s;
+    }
+    .card:hover { border-color: var(--brand); transform: translateY(-1px); }
+    .card .top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+    .card strong { font-size: 13px; }
+    .card .meta { color: var(--muted); font-size: 11px; margin-top: 4px; line-height: 1.45; }
+    .card .msg { margin-top: 8px; font-size: 12.5px; line-height: 1.5; color: #f8fafc; }
+    .reason { margin-top: 6px; color: #fdba74; font-size: 11px; }
+    .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .card-actions button { border: 1px solid #0e7490; background: #164e63; color: #e0f2fe; border-radius: 7px; padding: 6px 9px; font-size: 11px; cursor: pointer; }
+    .card-actions button:hover { background: #0e7490; }
+    .card-actions button:disabled { opacity: .6; cursor: wait; }
+    .ai-state-btn.active { border-color: #16a34a; background: #14532d; color: #dcfce7; }
+    .ai-state-btn.paused, .ai-state-btn.handoff { border-color: #d97706; background: #78350f; color: #fef3c7; }
+    .ai-state-label { display:inline-flex; align-items:center; min-height:25px; padding:0 9px; border:1px solid var(--line); border-radius:7px; color:var(--muted); font-size:11px; }
+    .handoff-label { display:inline-flex; margin-left:6px; padding:1px 5px; border:1px solid #f97316; border-radius:4px; color:#fed7aa; font-size:10px; }
+    .empty { text-align: center; color: var(--muted); padding: 48px 16px; font-size: 13px; }
+    .toast {
+      position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+      background: #111827; border: 1px solid var(--line); color: var(--text);
+      padding: 8px 12px; border-radius: 10px; font-size: 12px; display: none; z-index: 20;
+      max-width: 90vw;
+    }
+    .login-box {
+      max-width: 360px; margin: 12vh auto; padding: 18px; border-radius: 14px;
+      border: 1px solid var(--line); background: var(--card);
+    }
+    .login-box label { display: grid; gap: 4px; margin: 8px 0; font-size: 12px; color: var(--muted); }
+    .login-box input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: #0b1220; color: var(--text); }
+    .login-box button { width: 100%; margin-top: 10px; padding: 9px; border: 0; border-radius: 8px; background: #0284c7; color: #fff; font-weight: 700; cursor: pointer; }
+    .err { color: #fb923c; font-size: 12px; min-height: 16px; }
+  </style>
+  <script src="config.js"></script>
+</head>
+<body>
+  <div id="loginView" class="login-box" hidden>
+    <h1 style="margin:0 0 6px;font-size:16px">吸附条登录</h1>
+    <p class="sub" style="margin:0 0 10px;color:var(--muted);font-size:12px">聚合查看会话，点击跳转官方会话</p>
+    <label>用户名<input id="user" autocomplete="username" /></label>
+    <label>密码<input id="pass" type="password" autocomplete="current-password" /></label>
+    <div class="err" id="loginErr"></div>
+    <button id="btnLogin" type="button">登录</button>
+  </div>
+
+  <div id="appView" hidden>
+    <header>
+      <h1>聚合接待</h1>
+      <span class="badge" id="countBadge">0</span>
+      <span class="sub" id="statusLine">连接中…</span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="btnRefresh" type="button">刷新</button>
+      <button class="ghost" id="btnDebug" type="button">打开调试台</button>
+      <button class="ghost" id="btnLogout" type="button">退出</button>
+    </header>
+    <main id="list"><div class="empty">加载中…</div></main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const cfg = Object.assign({ apiBase: '' }, window.__KEFU_CONFIG__ || {});
+    let API = String(cfg.apiBase || localStorage.getItem('kefuApiBase') || '').replace(/\/$/, '');
+    const $ = (id) => document.getElementById(id);
+    function apiUrl(p){ return API + (p.startsWith('/')?p:('/'+p)); }
+    let LOCAL_SEAT = false;
+    function token(){ return sessionStorage.getItem('rbacUserToken') || ''; }
+    function toast(msg){
+      const el = $('toast'); el.textContent = msg; el.style.display = 'block';
+      clearTimeout(toast._t); toast._t = setTimeout(() => el.style.display = 'none', 3200);
+    }
+    async function req(path, opts={}){
+      const headers = Object.assign({}, opts.headers || {});
+      if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      if (token()) headers['X-User-Token'] = token();
+      const r = await fetch(apiUrl(path), Object.assign({}, opts, { headers }));
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error_user || j.error || r.statusText);
+      return j;
+    }
+    function showLogin(msg){
+      $('loginView').hidden = false; $('appView').hidden = true;
+      if (msg) $('loginErr').textContent = msg;
+    }
+    function showApp(){
+      $('loginView').hidden = true; $('appView').hidden = false;
+    }
+    function fmtTime(ts){
+      if (!ts) return '';
+      const d = new Date((ts < 1e12 ? ts * 1000 : ts));
+      return d.toLocaleString();
+    }
+    function render(items){
+      $('countBadge').textContent = String(items.length);
+      if (!items.length) {
+        $('list').innerHTML = '<div class="empty">当前没有会话</div>';
+        return;
+      }
+      $('list').innerHTML = items.map((it, idx) => `
+        <article class="card" data-idx="${idx}">
+          <div class="top">
+            <div>
+              <strong>${escapeHtml(it.nickname || it.buyer_id || '买家')}${it.handoff ? '<span class="handoff-label">需人工</span>' : ''}</strong>
+              <div class="meta">${escapeHtml(it.shop_name || it.shop_id || '')} · ${escapeHtml(it.platform || '')} · ${escapeHtml(it.account || '')}</div>
+            </div>
+            <div class="meta" style="text-align:right">${fmtTime(it.last_ts)}</div>
+          </div>
+          <div class="msg">${escapeHtml(it.last_text || '（无摘要）')}</div>
+          ${it.handoff_reason ? `<div class="reason">原因：${escapeHtml(it.handoff_reason)}</div>` : ''}
+          <div class="card-actions">${aiStateControl(it, idx)}</div>
+          <div class="meta" style="margin-top:8px;color:var(--brand)">点击 → 请求跳转官方会话（拼多多依赖探域工作台在线）</div>
+        </article>
+      `).join('');
+      $('list').querySelectorAll('.card').forEach(card => {
+        card.onclick = () => jump(items[Number(card.dataset.idx)]);
+      });
+      $('list').querySelectorAll('.ai-state-btn').forEach(button => {
+        button.onclick = (event) => {
+          event.stopPropagation();
+          toggleAi(items[Number(button.dataset.idx)], button);
+        };
+      });
+    }
+    function escapeHtml(s){
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function aiStateControl(it, idx){
+      const state = String(it.ai_takeover_state || (it.shop_ai_takeover_enabled ? 'active' : 'shadow'));
+      if (state === 'shadow') return '<span class="ai-state-label" title="该店铺未开启 AI 自动接待，仅生成影子回复">AI影子中</span>';
+      const enabled = state === 'active';
+      const text = enabled ? 'AI接待中' : (state === 'handoff' ? 'AI已暂停' : 'AI已关闭');
+      const title = enabled ? '点击关闭该会话 AI 接待' : '点击开启该会话 AI 接待';
+      return `<button type="button" class="ai-state-btn ${escapeHtml(state)}" data-enabled="${enabled ? '1' : '0'}" data-idx="${idx}" title="${title}">${text}</button>`;
+    }
+    async function loadQueue(){
+      $('statusLine').textContent = '刷新中…';
+      try {
+        const data = await req('/api/queue/handoff?limit=80&handoff=0');
+        render(data.items || []);
+        $('statusLine').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
+      } catch (e) {
+        $('statusLine').textContent = '加载失败';
+        if (String(e.message || '').includes('登录') || String(e.message || '').includes('401')) {
+          sessionStorage.removeItem('rbacUserToken');
+          showLogin(e.message);
+        } else {
+          toast(e.message || '加载失败');
+        }
+      }
+    }
+    async function jump(it){
+      if (!it) return;
+      toast('正在请求跳转…');
+      try {
+        // 秒跳: 直连本机探域 DLL 助手(18769), 毫秒级切会话
+        const q = new URLSearchParams({
+          uid: it.buyer_id || '',
+          nick: it.nickname || '',
+          acct: it.account || '',
+        });
+        const res = await fetch('http://127.0.0.1:18769/jump?' + q.toString());
+        const data = await res.json().catch(() => ({}));
+        if (data.ok) {
+          toast('已跳转 (' + (data.ms != null ? data.ms + 'ms' : 'ok') + ')');
+        } else {
+          toast(data.reason || '跳转失败');
+          alert('跳转失败：' + (data.reason || '') + '\n\n请手动打开：\n店：' + (it.shop_name||'') + '\n账号：' + (it.account||'') + '\n买家：' + (it.nickname || it.buyer_id));
+        }
+      } catch (e) {
+        toast(e.message || '跳转失败');
+        alert('跳转失败：' + e.message + '\n\n请手动打开：\n店：' + it.shop_name + '\n账号：' + it.account + '\n买家：' + (it.nickname || it.buyer_id));
+      }
+    }
+    async function toggleAi(it, button){
+      if (!it || !it.account || !it.buyer_id || button.disabled) return;
+      const enabled = button.dataset.enabled !== '1';
+      button.disabled = true;
+      button.textContent = enabled ? '正在开启…' : '正在关闭…';
+      try {
+        await req('/api/session/state', {
+          method: 'POST',
+          body: JSON.stringify({
+            account: it.account,
+            buyer_id: it.buyer_id,
+            ai_takeover_enabled: enabled,
+            reason: enabled ? '客服手动开启 AI 接待' : '客服手动关闭 AI 接待',
+          }),
+        });
+        toast(enabled ? '已开启该会话的 AI 接待' : '已关闭该会话的 AI 接待');
+        await loadQueue();
+      } catch (e) {
+        button.disabled = false;
+        button.textContent = enabled ? 'AI已关闭' : 'AI接待中';
+        toast(e.message || (enabled ? '开启 AI 失败' : '关闭 AI 失败'));
+      }
+    }
+    async function ensureAuth(){
+      // If frontend is proxied, API same-origin. Else config.apiBase points to brain.
+      if (LOCAL_SEAT) {
+        try {
+          await req('/api/auth/me');
+          $('btnLogout').hidden = true;
+          showApp();
+          return true;
+        } catch (e) {
+          showLogin(e.message || '本机工作台未就绪');
+          return false;
+        }
+      }
+      if (!token()) { showLogin(); return false; }
+      try {
+        await req('/api/auth/me');
+        showApp();
+        return true;
+      } catch (e) {
+        sessionStorage.removeItem('rbacUserToken');
+        showLogin(e.message || '请登录');
+        return false;
+      }
+    }
+    $('btnLogin').onclick = async () => {
+      try {
+        const j = await req('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username: $('user').value.trim(), password: $('pass').value })
+        });
+        sessionStorage.setItem('rbacUserToken', j.token || '');
+        showApp();
+        loadQueue();
+      } catch (e) {
+        $('loginErr').textContent = e.message || '登录失败';
+      }
+    };
+    $('btnRefresh').onclick = () => loadQueue();
+    $('btnLogout').onclick = () => {
+      sessionStorage.removeItem('rbacUserToken');
+      showLogin('已退出');
+    };
+    $('btnDebug').onclick = () => {
+      // Full debug workbench on same host
+      const base = location.origin.replace(/\/$/, '');
+      window.open(base + '/', '_blank');
+    };
+    (async () => {
+      // Discover runtime config if needed
+      try {
+        const r = await fetch(apiUrl('/api/runtime-config'));
+        const j = await r.json();
+        LOCAL_SEAT = !!(j && j.ui_role === 'seat' && j.rbac_enabled === false);
+        if (j && j.backend_hint && !API && location.port === '18766') {
+          // proxied mode keeps empty API
+        }
+      } catch (_) {}
+      if (await ensureAuth()) {
+        loadQueue();
+        setInterval(loadQueue, 5000);
+      }
+    })();
+  </script>
+</body>
+</html>
