@@ -80,7 +80,17 @@ Copy-Item -Recurse -Force $gatewayInternal $agentBundle
 Copy-Item -Force $adsorbExe $agentBundle
 Copy-Item -Recurse -Force $adsorbInternal $agentBundle
 Copy-Item -Force $jumpHelper $agentBundle
-Copy-Item -Force $jumpHelper $agentBundle
+
+# 原生通道（v0.7）: 发送/接收 DLL 与注入器随包分发；开发机路径缺失时不阻塞构建
+$nativeDll = "D:\temp\pdd-send-hook\out\pdd_send_v3.dll"
+$nativeInjector = "D:\temp\pdd-send-hook\out\injector.exe"
+if ((Test-Path -LiteralPath $nativeDll) -and (Test-Path -LiteralPath $nativeInjector)) {
+    Copy-Item -Force $nativeDll $agentBundle
+    Copy-Item -Force $nativeInjector $agentBundle
+    Write-Host "Native:  pdd_send_v3.dll + injector.exe (copied into agent bundle)"
+} else {
+    Write-Warning "native dll/injector not found, bundle ships without native channel"
+}
 
 $missing = @()
 if (-not (Test-Path (Join-Path $agentBundle "LocalSeatGateway.exe"))) { $missing += "LocalSeatGateway.exe" }

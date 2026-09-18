@@ -168,6 +168,11 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "send_via_dll_pipe": str(data.get("send_via_dll_pipe") or r"\\.\pipe\pdd_send_bridge"),
         "pdd_dll_path": str(data.get("pdd_dll_path") or r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"),
         "pdd_injector_path": str(data.get("pdd_injector_path") or r"D:\temp\pdd-send-hook\out\injector.exe"),
+        # 原生接收（v0.7）: recv_via_dll 开启后从注入 DLL 收 push 帧；
+        # recv_slot=-1 表示虚表槽位未确认（只允许探针模式），确认后填真实槽位号。
+        "recv_via_dll": bool(data.get("recv_via_dll", False)),
+        "recv_slot": int(data.get("recv_slot") or -1),
+        "recv_mode": int(data.get("recv_mode") or 0),
     }
     if not out["agent_id"]:
         out["agent_id"] = (
@@ -212,6 +217,12 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "cdp_port": cfg.get("cdp_port"),
         "cdp_poll_interval": float(cfg.get("cdp_poll_interval") or 0.2),
         "cdp_emit_history": bool(cfg.get("cdp_emit_history", False)),
+        "send_via_dll": bool(cfg.get("send_via_dll", False)),
+        "pdd_dll_path": str(cfg.get("pdd_dll_path") or ""),
+        "pdd_injector_path": str(cfg.get("pdd_injector_path") or ""),
+        "recv_via_dll": bool(cfg.get("recv_via_dll", False)),
+        "recv_slot": int(cfg.get("recv_slot") or -1),
+        "recv_mode": int(cfg.get("recv_mode") or 0),
     }
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     # utf-8 without BOM (PowerShell UTF8 encoding often adds BOM and breaks json.loads)

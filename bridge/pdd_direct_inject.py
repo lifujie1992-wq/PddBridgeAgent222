@@ -27,6 +27,27 @@ DEFAULT_INJECTOR = r"D:\temp\pdd-send-hook\out\injector.exe"
 WORKBENCH_EXE = "pddworkbench.exe"
 
 
+def resolve_tool(value: str | None, filename: str, dev_default: str) -> str:
+    """解析 DLL/注入器路径：配置值存在则用；冻结安装用 exe 同目录；
+    都没有才回退开发机默认路径。客户机装包后无需改配置。"""
+    from pathlib import Path
+    import sys
+    if value:
+        try:
+            if Path(value).exists():
+                return value
+        except OSError:
+            pass
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / filename)
+    candidates.append(Path(__file__).resolve().parent.parent / filename)
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    return value or dev_default
+
+
 # ---------- 进程发现（纯 stdlib，不依赖 psutil） ----------
 class _ME32(ctypes.Structure):
     _fields_ = [("dwSize", wintypes.DWORD), ("th32ModuleID", wintypes.DWORD),
@@ -134,8 +155,8 @@ def ensure_injected(cfg: dict | None = None, *, wait_ready_s: float = 12.0) -> b
     """确保工作台已注入且直发就绪。返回是否就绪。"""
     cfg = cfg or {}
     pipe = str(cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-    dll = str(cfg.get("pdd_dll_path") or DEFAULT_DLL)
-    injector = str(cfg.get("pdd_injector_path") or DEFAULT_INJECTOR)
+    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+    injector = resolve_tool(cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
     dll_name = Path(dll).name
 
     st = pipe_state(pipe)
@@ -181,8 +202,8 @@ class InjectWatcher(threading.Thread):
 
     def run(self) -> None:
         pipe = str(self.cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-        dll = str(self.cfg.get("pdd_dll_path") or DEFAULT_DLL)
-        injector = str(self.cfg.get("pdd_injector_path") or DEFAULT_INJECTOR)
+        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+        injector = resolve_tool(self.cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
         dll_name = Path(dll).name
         while not self._stop_evt.wait(self.interval):
             try:
@@ -205,7 +226,7 @@ class InjectWatcher(threading.Thread):
 def status(cfg: dict | None = None) -> dict:
     cfg = cfg or {}
     pipe = str(cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-    dll = str(cfg.get("pdd_dll_path") or DEFAULT_DLL)
+    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
     pids = workbench_pids()
     injected = {pid: module_loaded(pid, Path(dll).name) for pid in pids}
     return {"workbench_pids": pids, "dll": dll, "injected": injected,

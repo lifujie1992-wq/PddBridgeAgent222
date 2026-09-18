@@ -9,7 +9,7 @@ Does NOT run AI/brain. Only:
 
 import hashlib
 
-__version__ = "0.6.2.3"
+__version__ = "0.7.0.0"
 __build_hash__ = hashlib.sha256(
     f"PddBridgeAgent|{__version__}|pdd-imws-v2-business-message".encode("utf-8")
 ).hexdigest()[:16]

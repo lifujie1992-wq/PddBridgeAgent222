@@ -279,6 +279,7 @@ class PddbridgeSource:
         # 拿同步返回值；未就绪则返回 None 自动回退原 CDP 路径。
         self.direct_send = None
         self._inject_watcher = None
+        self._native_recv = None
         if bool(self.cfg.get("send_via_dll", False)):
             try:
                 from .pdd_send_direct import DirectSender
@@ -326,8 +327,18 @@ class PddbridgeSource:
             return self
         self._stop_evt.clear()
         self._fallback_done = False
-        # 直发通道：后台注入器（工作台一出现就注入；构造函数钩子需在启动阶段生效）
-        if self.direct_send is not None and self._inject_watcher is None:
+        # 原生注入通道：发送（send_via_dll）或接收（recv_via_dll）任一开启都需要注入
+        native_send = bool(self.cfg.get("send_via_dll", False))
+        native_recv = bool(self.cfg.get("recv_via_dll", False))
+        if native_recv and self._native_recv is None:
+            try:
+                from .pdd_recv import NativeReceiver
+
+                self._native_recv = NativeReceiver(self.feed_native_frame, self.cfg).start()
+                log.info("原生接收通道已启动（slot=%s）", self.cfg.get("recv_slot"))
+            except Exception as exc:
+                log.warning("原生接收通道启动失败: %s", exc)
+        if (native_send or native_recv) and self._inject_watcher is None:
             try:
                 from .pdd_direct_inject import InjectWatcher, ensure_injected
 
@@ -335,7 +346,7 @@ class PddbridgeSource:
                 self._inject_watcher = InjectWatcher(self.cfg)
                 self._inject_watcher.start()
             except Exception as exc:
-                log.warning("直发注入器启动失败, 继续用 CDP: %s", exc)
+                log.warning("注入器启动失败, 继续用 CDP: %s", exc)
         if self._push.port is None:
             try:
                 log.info("pddbridge 推送通道监听 127.0.0.1:%s", self._push.start())
@@ -354,6 +365,12 @@ class PddbridgeSource:
             except Exception:
                 pass
             self._inject_watcher = None
+        if self._native_recv is not None:
+            try:
+                self._native_recv.stop()
+            except Exception:
+                pass
+            self._native_recv = None
         self._close_sessions()
         if self._thread:
             self._thread.join(timeout=5)
@@ -697,6 +714,12 @@ class PddbridgeSource:
             self._raw_archive_bytes += len(line.encode("utf-8"))
         except Exception as exc:
             self._warn_throttled("raw_archive", "原始帧归档写入失败: %s" % exc)
+
+    # ---------------- 帧入口 ----------------
+    def feed_native_frame(self, raw: str) -> None:
+        """原生 DLL 通道的 push 帧（v0.7）：与注入脚本的 entry 同构，复用帧处理管线。"""
+        self._handle_frame({"dir": "in", "data": raw, "t": int(time.time() * 1000),
+                            "chan": "native"})
 
     # ---------------- 扫描/注入 ----------------
     def _try_recover(self) -> bool:
