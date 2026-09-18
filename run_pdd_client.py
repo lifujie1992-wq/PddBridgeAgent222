@@ -1213,6 +1213,15 @@ def _retry_local_gateway_after_setup(stop_event: threading.Event) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 单实例锁: 桥接双开会互相抢 CDP/中心注册/本地网关端口，
+    # 表现为“监听未就绪”。广告窗自启 + 手动双击很容易触发双开。
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.kernel32.CreateMutexW(None, False, "PddBridgeAgent_SingleInstance")
+        if ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            log.warning("已有桥接实例在运行，本次启动退出（防止双开打架）")
+            return 0
     log_dir = _root() / "logs"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)

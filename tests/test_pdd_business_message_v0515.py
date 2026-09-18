@@ -228,7 +228,7 @@ def test_business_message_enters_local_and_center_queues(tmp_path: Path, monkeyp
         assert local_event["role"] == center_event["role"] == "mall_cs"
         agent.platform.channel_status = lambda _cfg: {}
         heartbeat = agent._status_payload()
-        assert heartbeat["version"] == "0.7.0.1"
+        assert heartbeat["version"] == "0.7.0.2"
         assert heartbeat["build_hash"] == BUILD_HASH
         assert heartbeat["parser_profile"]["version"] == "pdd-imws-v2-business-message"
     finally:
@@ -238,7 +238,7 @@ def test_business_message_enters_local_and_center_queues(tmp_path: Path, monkeyp
 
 
 def test_v0515_observability_and_register_version(monkeypatch) -> None:
-    assert VERSION == "0.7.0.1"
+    assert VERSION == "0.7.0.2"
     assert len(BUILD_HASH) == 16
     assert BUILTIN_PARSER_PROFILE["version"] == "pdd-imws-v2-business-message"
     captured = {}
@@ -249,7 +249,7 @@ def test_v0515_observability_and_register_version(monkeypatch) -> None:
 
     monkeypatch.setattr(BridgeClient, "_request", request)
     BridgeClient("http://127.0.0.1", "fictional-token", "fictional-agent").register()
-    assert captured["version"] == "0.7.0.1"
+    assert captured["version"] == "0.7.0.2"
 
 
 def test_agent_and_gateway_versions_stay_in_lockstep() -> None:
