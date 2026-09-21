@@ -268,6 +268,22 @@ def as_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _shop_id_allowlist(value: Any) -> list[str]:
+    """灰度店铺白名单：只接受明确的字符串列表，其余一律视为空（fail closed）。
+
+    缺失键、`[]`、字符串、数字、`None` 都等于**关闭**；绝不接受"除黑名单外全放"，
+    也不接受把 `"mall_123"` 这种裸字符串当成单元素列表。
+    """
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for item in value:
+        shop_id = str(item or "").strip()
+        if shop_id and shop_id not in out:
+            out.append(shop_id)
+    return out
+
+
 def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, Any]:
     # Detect platform from filename when path given.
     cfg_path = path
@@ -315,6 +331,16 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "upload_batch_size": int(data.get("upload_batch_size") or 500),
         "upload_concurrency": int(data.get("upload_concurrency") or 6),
         "upload_drain_budget_seconds": float(data.get("upload_drain_budget_seconds") or 3.0),
+        # 灰度（默认全关，fail closed）：只有白名单命中的店铺才走新路径。
+        #   immediate_ingress_shop_ids —— 命中时买家消息不再被订单上下文门控扣住，
+        #     原始消息立即上传，订单上下文随后按同一个 msg_id 补发一条增强事件；
+        #     中心按 msg_id 判重，只有首次插入才会入队 AI 任务，不会二次回复。
+        #   command_sender_shop_ids / command_sender_workers —— 命中时出站发送交给
+        #     并发发送池，取指令循环不再被上一条的发送确认超时（默认 10s）占住；
+        #     同一买家仍由逐会话锁保证有序。
+        "immediate_ingress_shop_ids": _shop_id_allowlist(data.get("immediate_ingress_shop_ids")),
+        "command_sender_shop_ids": _shop_id_allowlist(data.get("command_sender_shop_ids")),
+        "command_sender_workers": int(data.get("command_sender_workers") or 6),
         "outgoing_dedup_seconds": float(data.get("outgoing_dedup_seconds") or 60.0),
         # 中心 WS 上行通道（protocol_version 1）。默认关：灰度按机器打开，连接失败
         # 或协议不匹配时自动回落 HTTP。**故意不放进 _MIGRATIONS_V1** —— 迁移会强制
@@ -542,6 +568,10 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "upload_batch_size": 500,
         "upload_concurrency": 6,
         "upload_drain_budget_seconds": 3.0,
+        # 灰度（默认全关）：白名单命中的店铺才走即时上传 / 并发发送池。
+        "immediate_ingress_shop_ids": [],
+        "command_sender_shop_ids": [],
+        "command_sender_workers": 6,
         "outgoing_dedup_seconds": 60.0,
         "history_pull_seconds": 0,
         "history_pull_size": 20,

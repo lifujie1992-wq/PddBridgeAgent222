@@ -422,6 +422,42 @@ def _message_with_local_context(agent, message: dict) -> dict:
     return normalized
 
 
+def context_update_event(event: dict) -> dict:
+    """把事件 id 换成确定性的「上下文增强」id（按原始 event_id 派生）。"""
+    updated = dict(event)
+    original_id = str(event.get("event_id") or event.get("idempotency_key") or "")
+    update_id = "pdd-context-" + hashlib.sha256(original_id.encode("utf-8")).hexdigest()[:32]
+    updated["event_id"] = update_id
+    updated["idempotency_key"] = update_id
+    return updated
+
+
+def immediate_ingress_enabled(agent, account: str) -> bool:
+    """店铺级灰度：命中白名单时，消息不再被订单上下文门控扣住。默认关闭。
+
+    fail closed：键缺失 / `[]` / 字符串 / 其它非列表值一律视为关闭。
+    """
+    allowlist = agent.cfg.get("immediate_ingress_shop_ids")
+    if not isinstance(allowlist, (list, tuple, set)) or not allowlist:
+        return False
+    allowed = {str(item or "").strip() for item in allowlist if str(item or "").strip()}
+    shop_id = str(agent._account_shop_id(account) or "").strip()
+    return bool(shop_id and shop_id in allowed)
+
+
+def enrichment_event(agent, event_id: str, enriched: dict) -> dict:
+    """按原始 event_id 生成**确定性**的上下文增强事件：重复补发也幂等。
+
+    中心按 `msg_id` 判重，只有首次插入才会入队 AI 任务；所以这条增强事件
+    只会把订单上下文补进已有消息，不会二次回复。
+    """
+    update_id = context_update_event({"event_id": event_id})["event_id"]
+    event = _event_from_message(agent, enriched)
+    event["event_id"] = update_id
+    event["idempotency_key"] = update_id
+    return event
+
+
 def install_local_first() -> None:
     import bridge
     from bridge import agent as agent_module
@@ -447,13 +483,28 @@ def install_local_first() -> None:
             )
         )
 
-    def context_update_event(event: dict) -> dict:
-        updated = dict(event)
-        original_id = str(event.get("event_id") or event.get("idempotency_key") or "")
-        update_id = "pdd-context-" + hashlib.sha256(original_id.encode("utf-8")).hexdigest()[:32]
-        updated["event_id"] = update_id
-        updated["idempotency_key"] = update_id
-        return updated
+    def enqueue_center_event(agent, event: dict) -> bool:
+        """把补充事件写入中心待发队列：持久化 + 去重 + 唤醒上传线程。"""
+        event = agent._ensure_event_id(event)
+        event_id = str(event.get("event_id") or "")
+        if not event_id:
+            return False
+        with agent._pending_lock:
+            if not hasattr(agent, "_pending_ids"):
+                agent._pending_ids = {e["event_id"] for e in agent._pending}
+            if event_id in agent._pending_ids:
+                return False
+            try:
+                agent._append_local_queue(event)
+            except OSError as exc:
+                agent._last_error = f"append_local_queue: {exc}"
+                return False
+            agent._pending.append(event)
+            agent._pending_ids.add(event_id)
+        agent._ledger_note(event_id, "captured_context_update", event=event)
+        ensure_upload_worker(agent)
+        agent._immediate_upload_event.set()
+        return True
 
     def replace_pending_event(self, event_id: str, enriched_message: dict) -> bool:
         replacement = _event_from_message(self, enriched_message)
@@ -550,8 +601,12 @@ def install_local_first() -> None:
                     else:
                         note("failed", str(lookup.get("error") or "lookup_failed"))
                     if replaced and bool(self.cfg.get("dual_write_local_workbench", True)):
-                        rich_event = context_update_event(_event_from_message(self, enriched))
-                        self._local_delivery.enqueue(rich_event)
+                        self._local_delivery.enqueue(enrichment_event(self, event_id, enriched))
+                    if immediate_ingress_enabled(self, str(message.get("account") or "")):
+                        # 灰度：原始消息早已上传；这里按同一个 msg_id 补发一条
+                        # 上下文增强事件（新 event_id）。大脑按 msg_id 判为 duplicate
+                        # 并合并订单上下文，只有首次插入才会入队 AI 任务，不会二次回复。
+                        enqueue_center_event(self, enrichment_event(self, event_id, enriched))
                 except Exception:
                     note("failed", "context_commit_error")
                     fallback = dict(message)
@@ -802,14 +857,24 @@ def install_local_first() -> None:
                     self._local_first_deadlines[event_id] = time.monotonic() + 1.0
         lookup_required = needs_order_context(message)
         event_id = str(event.get("event_id") or event.get("idempotency_key") or "")
+        # 灰度：命中店铺时订单上下文查询与上传并行，消息不再被扣在队列里。
+        # 未命中（默认）走原来的门控路径，行为与改动前完全一致。
+        ingress_immediate = bool(
+            event_id and immediate_ingress_enabled(self, str(message.get("account") or ""))
+        )
         if lookup_required and event_id:
             ensure_context_worker(self)
             with self._pdd_context_gate_lock:
-                if event_id in self._pdd_context_pending_ids:
-                    lookup_required = False
-                else:
+                already_pending = event_id in self._pdd_context_pending_ids
+                if ingress_immediate:
+                    # 不进 blocked 集合：flush_events 不会拦它，原始消息立即上传。
+                    self._pdd_context_pending_ids.discard(event_id)
+                    self._pdd_context_deadlines.pop(event_id, None)
+                elif not already_pending:
                     self._pdd_context_pending_ids.add(event_id)
                     self._pdd_context_deadlines[event_id] = time.monotonic() + self._pdd_context_gate_seconds
+            if already_pending and not ingress_immediate:
+                lookup_required = False
         original_on_local_event(self, message)
         if lookup_required and event_id:
             self._pdd_context_queue.put((event_id, message))
