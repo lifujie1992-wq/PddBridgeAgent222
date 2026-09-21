@@ -1131,6 +1131,91 @@ class BridgeAgent:
             with self._pending_lock:
                 self._inflight_ids -= {str(e.get("event_id") or "") for e in batch}
 
+    # ------------------------------------------------------------------ 出站并发池
+    # 背景（0.7.5 r2 的 P0）：一条回复要等平台回执，实测最长 10s，所以单线程出站的
+    # 上限只有约 6 条/分钟/工位，而峰值需要约 38 条/分钟/工位。把「取指令」与「发送」
+    # 解耦，取指令循环就不再被上一条的发送确认超时占住。
+    # 灰度：`command_sender_shop_ids` 白名单命中才走池子，默认 [] = 完全关闭（fail closed）；
+    # 未命中、池子写满（背压）都退回原来的串行路径，行为与改动前一致。
+    def _ensure_sender_state(self) -> None:
+        """惰性初始化发送池状态（兼容绕过 __init__ 的构造路径）。"""
+        if getattr(self, "_sender_queue", None) is None:
+            self._sender_queue = queue.Queue(maxsize=64)
+        if not hasattr(self, "_sender_threads"):
+            self._sender_threads = []
+        if not hasattr(self, "_sender_conv_locks"):
+            self._sender_conv_locks = {}
+        if not hasattr(self, "_sender_conv_locks_guard"):
+            self._sender_conv_locks_guard = threading.Lock()
+        if not hasattr(self, "_sender_pool_guard"):
+            self._sender_pool_guard = threading.Lock()
+
+    def _command_sender_shop_ids(self) -> List[str]:
+        allowlist = self.cfg.get("command_sender_shop_ids")
+        if not isinstance(allowlist, (list, tuple, set)):
+            return []
+        return [str(item or "").strip() for item in allowlist if str(item or "").strip()]
+
+    def _command_sender_enabled(self, account: Any) -> bool:
+        """店铺级灰度：本店铺的出站发送是否交给并发发送池。默认关闭。"""
+        allowed = set(self._command_sender_shop_ids())
+        if not allowed:
+            return False
+        shop_id = str(self._account_shop_id(account) or "").strip()
+        return bool(shop_id and shop_id in allowed)
+
+    def _sender_conversation_lock(self, account: Any, buyer_id: Any) -> threading.Lock:
+        """同一买家保持串行，避免并行发送打乱回复顺序。"""
+        self._ensure_sender_state()
+        key = f"{str(account or '').strip()}|{str(buyer_id or '').strip()}"
+        with self._sender_conv_locks_guard:
+            lock = self._sender_conv_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._sender_conv_locks[key] = lock
+            return lock
+
+    def _sender_worker_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                cmd = self._sender_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                account = str(cmd.get("account") or "").strip()
+                buyer_id = str(cmd.get("buyer_id") or "").strip()
+                with self._sender_conversation_lock(account, buyer_id):
+                    self._execute_command(cmd)
+            except Exception:
+                # 单条命令异常不能打死发送线程，否则出站会整体停摆。
+                log.exception("command sender worker failed")
+            finally:
+                self._sender_queue.task_done()
+
+    def _start_sender_pool(self) -> None:
+        """启动并发发送池。幂等、线程安全；未开灰度时一个线程都不建。"""
+        self._ensure_sender_state()
+        if not self._command_sender_shop_ids():
+            return
+        with self._sender_pool_guard:
+            if self._sender_threads:
+                return
+            try:
+                workers = int(self.cfg.get("command_sender_workers") or 6)
+            except (TypeError, ValueError):
+                workers = 6
+            workers = max(1, min(workers, 8))
+            for index in range(workers):
+                thread = threading.Thread(
+                    target=self._sender_worker_loop,
+                    name=f"bridge-command-sender-{index + 1}",
+                    daemon=True,
+                )
+                thread.start()
+                self._sender_threads.append(thread)
+            log.info("出站并发发送池已启动：%d 个 worker，灰度店铺 %s",
+                     workers, ", ".join(self._command_sender_shop_ids()))
+
     def _apply_session_state(self, cmd: dict) -> dict:
         """把中心下发的会话状态（转人工 / AI 开关）落地到本机工作台。
 
@@ -1362,178 +1447,203 @@ class BridgeAgent:
                 "指令周期分段：取指令 %.1fs（预期约 %.1fs）+ 补报结果 %.1fs",
                 poll_elapsed, wait_seconds, retry_elapsed, interval=30.0)
         counters["poll_ok"] += 1
+        # 灰度店铺：投入并发发送池后立刻回去拉下一条，不再被上一条的发送确认
+        # 超时（默认 10s）占住拉取循环；池子写满时退回串行执行形成背压，
+        # 避免租约过期；未命中白名单（默认）完全走原来的串行路径。
+        self._ensure_sender_state()
+        inline: List[dict] = []
         for cmd in commands:
-            command_id = str(cmd.get("id") or cmd.get("command_id") or "").strip()
-            if not command_id:
-                # 缺 id 的指令原来是直接 continue、一个字都不记。中心换了字段名
-                # 就会变成"所有指令静默消失"，而日志上完全看不出来。
-                counters["no_id"] += 1
-                self._log_throttled(
-                    "no_command_id",
-                    "收到没有 id/command_id 的指令（累计 %d 条），已丢弃。"
-                    "中心侧字段名可能变了，指令内容: %s",
-                    counters["no_id"],
-                    json.dumps(cmd, ensure_ascii=False)[:300],
-                )
-                continue
-            if not self._claim_command(command_id):
-                # 并发的另一条轮询已经拿到它了（或本机已处理过）——
-                # 绝不能执行第二遍，否则买家会收到两条一样的回复。
-                continue
-            counters["received"] += 1
-            counters["last_received_at"] = time.time()
-            existing = self.command_journal.get(command_id)
-            if existing is not None:
-                if existing.get("state") == "result_pending":
-                    self._report_command_result(command_id, dict(existing.get("result") or {}))
-                continue
-            if command_id in self._commands_done:
-                continue
-            buyer_id = str(cmd.get("buyer_id") or "").strip()
-            account = str(cmd.get("account") or "").strip()
-            content = str(cmd.get("content") or "").strip()
-            cmd_type = str(cmd.get("type") or "send_text").strip() or "send_text"
-            meta = cmd.get("meta") if isinstance(cmd.get("meta"), dict) else {}
-            buyer_nick = str(meta.get("buyer_nick") or meta.get("nick") or "").strip()
-            log.info(
-                "command %s type=%s content_chars=%d",
-                command_id, cmd_type, len(content),
-            )
-            if not self.command_journal.start(cmd):
-                self._last_error = self.command_journal.last_error
-                log.error("command journal unavailable; refusing execution: %s", command_id)
-                continue
-            if cmd_type not in {"send_text", "open_chat", "pull_history", "session_state"}:
-                result = {"ok": False, "status": "blocked", "real_send": False,
-                          "retryable": False, "error": "unsupported_command_type"}
-            elif cmd_type == "session_state":
-                log.info("command %s session_state payload=%s", command_id,
-                         json.dumps({k: v for k, v in cmd.items() if k != "id"},
-                                    ensure_ascii=False)[:500])
-                result = self._apply_session_state(cmd)
-            elif self._command_expired(cmd):
-                result = {"ok": False, "status": "expired", "real_send": False,
-                          "retryable": False, "via": "expired",
-                          "error": "automatic_command_expired_or_unverifiable_time"}
-            elif cmd_type == "pull_history":
-                # 直拉历史：按买家 uid 分页取，不抢界面焦点（应答走既有 list 帧流上报）
-                src = self.pddbridge_source
-                if src is None:
-                    result = {"ok": False, "status": "unsupported", "real_send": False,
-                              "error": "pddbridge source 未启动",
-                              "error_user": "当前不是 PDD 直连模式，无法拉历史"}
-                else:
-                    want = cmd.get("size") or cmd.get("count") or cmd.get("limit")
-                    try:
-                        want_n = int(want) if want else None
-                    except (TypeError, ValueError):
-                        want_n = None
-                    # 必须和上面的 size 一样兜住脏值：中心发 "0x10" 之类会让 int()
-                    # 抛异常，而 _handle_commands 整体没有隔离，异常会杀死命令
-                    # 长轮询线程 —— 心跳照常、界面显示运行中，但再也不执行任何指令。
-                    try:
-                        start_index = int(cmd.get("start_index") or 0)
-                    except (TypeError, ValueError):
-                        start_index = 0
-                    result = src.pull_history(
-                        buyer_id, account, size=want_n,
-                        begin_msg_id=cmd.get("begin_msg_id") or 0,
-                        start_index=start_index,
-                        pre_msg_id=cmd.get("pre_msg_id") or 0,
-                    ) or {}
-            elif cmd_type == "open_chat":
-                # Production adsorb jump: only focus conversation, no text send.
+            account = str((cmd or {}).get("account") or "").strip()
+            if self._command_sender_enabled(account):
                 try:
-                    open_fn = getattr(self.platform, "open_chat", None)
-                    if callable(open_fn):
-                        open_cfg = dict(self.cfg)
-                        open_cfg["_effective_source"] = self._effective_source
-                        if self.pddbridge_source is not None:
-                            open_cfg["_pddbridge_source"] = self.pddbridge_source
-                        result = open_fn(buyer_id, account, buyer_nick=buyer_nick, cfg=open_cfg) or {}
-                    else:
-                        # Fallback: attempt send_text empty is wrong; return guided failure
-                        result = {
-                            "ok": False,
-                            "status": "unsupported",
-                            "error": "platform has no open_chat",
-                            "error_user": "当前平台桥接暂不支持一键跳转会话，请在官方客户端手动打开",
-                            "real_send": False,
-                            "via": "open_chat",
-                        }
-                    if not isinstance(result, dict):
-                        result = {"ok": bool(result), "via": "open_chat"}
-                    result.setdefault("via", "open_chat")
-                    result.setdefault("real_send", False)
-                except Exception as exc:
+                    self._sender_queue.put_nowait(cmd)
+                    continue
+                except queue.Full:
+                    log.warning("command sender pool saturated; executing inline: %s",
+                                str((cmd or {}).get("id")
+                                    or (cmd or {}).get("command_id") or ""))
+            inline.append(cmd)
+        for cmd in inline:
+            self._execute_command(cmd)
+
+    def _execute_command(self, cmd: dict) -> None:
+        """执行单条指令：认领 → 执行 → 存台账 → 回执。
+
+        原来是 `_handle_commands` 里 `for cmd in commands:` 的循环体，为了让出站
+        发送池能并发调用而原样抽出来（行为不变）。
+        """
+        counters = self._cmd_counters()
+        command_id = str(cmd.get("id") or cmd.get("command_id") or "").strip()
+        if not command_id:
+            # 缺 id 的指令原来是直接 continue、一个字都不记。中心换了字段名
+            # 就会变成"所有指令静默消失"，而日志上完全看不出来。
+            counters["no_id"] += 1
+            self._log_throttled(
+                "no_command_id",
+                "收到没有 id/command_id 的指令（累计 %d 条），已丢弃。"
+                "中心侧字段名可能变了，指令内容: %s",
+                counters["no_id"],
+                json.dumps(cmd, ensure_ascii=False)[:300],
+            )
+            return
+        if not self._claim_command(command_id):
+            # 并发的另一条轮询已经拿到它了（或本机已处理过）——
+            # 绝不能执行第二遍，否则买家会收到两条一样的回复。
+            return
+        counters["received"] += 1
+        counters["last_received_at"] = time.time()
+        existing = self.command_journal.get(command_id)
+        if existing is not None:
+            if existing.get("state") == "result_pending":
+                self._report_command_result(command_id, dict(existing.get("result") or {}))
+            return
+        if command_id in self._commands_done:
+            return
+        buyer_id = str(cmd.get("buyer_id") or "").strip()
+        account = str(cmd.get("account") or "").strip()
+        content = str(cmd.get("content") or "").strip()
+        cmd_type = str(cmd.get("type") or "send_text").strip() or "send_text"
+        meta = cmd.get("meta") if isinstance(cmd.get("meta"), dict) else {}
+        buyer_nick = str(meta.get("buyer_nick") or meta.get("nick") or "").strip()
+        log.info(
+            "command %s type=%s content_chars=%d",
+            command_id, cmd_type, len(content),
+        )
+        if not self.command_journal.start(cmd):
+            self._last_error = self.command_journal.last_error
+            log.error("command journal unavailable; refusing execution: %s", command_id)
+            return
+        if cmd_type not in {"send_text", "open_chat", "pull_history", "session_state"}:
+            result = {"ok": False, "status": "blocked", "real_send": False,
+                      "retryable": False, "error": "unsupported_command_type"}
+        elif cmd_type == "session_state":
+            log.info("command %s session_state payload=%s", command_id,
+                     json.dumps({k: v for k, v in cmd.items() if k != "id"},
+                                ensure_ascii=False)[:500])
+            result = self._apply_session_state(cmd)
+        elif self._command_expired(cmd):
+            result = {"ok": False, "status": "expired", "real_send": False,
+                      "retryable": False, "via": "expired",
+                      "error": "automatic_command_expired_or_unverifiable_time"}
+        elif cmd_type == "pull_history":
+            # 直拉历史：按买家 uid 分页取，不抢界面焦点（应答走既有 list 帧流上报）
+            src = self.pddbridge_source
+            if src is None:
+                result = {"ok": False, "status": "unsupported", "real_send": False,
+                          "error": "pddbridge source 未启动",
+                          "error_user": "当前不是 PDD 直连模式，无法拉历史"}
+            else:
+                want = cmd.get("size") or cmd.get("count") or cmd.get("limit")
+                try:
+                    want_n = int(want) if want else None
+                except (TypeError, ValueError):
+                    want_n = None
+                # 必须和上面的 size 一样兜住脏值：中心发 "0x10" 之类会让 int()
+                # 抛异常，而 _handle_commands 整体没有隔离，异常会杀死命令
+                # 长轮询线程 —— 心跳照常、界面显示运行中，但再也不执行任何指令。
+                try:
+                    start_index = int(cmd.get("start_index") or 0)
+                except (TypeError, ValueError):
+                    start_index = 0
+                result = src.pull_history(
+                    buyer_id, account, size=want_n,
+                    begin_msg_id=cmd.get("begin_msg_id") or 0,
+                    start_index=start_index,
+                    pre_msg_id=cmd.get("pre_msg_id") or 0,
+                ) or {}
+        elif cmd_type == "open_chat":
+            # Production adsorb jump: only focus conversation, no text send.
+            try:
+                open_fn = getattr(self.platform, "open_chat", None)
+                if callable(open_fn):
+                    open_cfg = dict(self.cfg)
+                    open_cfg["_effective_source"] = self._effective_source
+                    if self.pddbridge_source is not None:
+                        open_cfg["_pddbridge_source"] = self.pddbridge_source
+                    result = open_fn(buyer_id, account, buyer_nick=buyer_nick, cfg=open_cfg) or {}
+                else:
+                    # Fallback: attempt send_text empty is wrong; return guided failure
                     result = {
                         "ok": False,
-                        "status": "error",
-                        "error": str(exc),
-                        "error_user": f"跳转会话失败：{exc}",
+                        "status": "unsupported",
+                        "error": "platform has no open_chat",
+                        "error_user": "当前平台桥接暂不支持一键跳转会话，请在官方客户端手动打开",
                         "real_send": False,
                         "via": "open_chat",
                     }
-            # refuse pure ??? — usually encoding death, not a real reply
-            elif content and content.replace("?", "").strip() == "" and set(content) <= {"?"}:
+                if not isinstance(result, dict):
+                    result = {"ok": bool(result), "via": "open_chat"}
+                result.setdefault("via", "open_chat")
+                result.setdefault("real_send", False)
+            except Exception as exc:
                 result = {
                     "ok": False,
-                    "status": "blocked",
-                    "error": "content is only question marks",
-                    "error_user": "发送内容异常（只有 ???），已拦截；请重新输入中文再发",
+                    "status": "error",
+                    "error": str(exc),
+                    "error_user": f"跳转会话失败：{exc}",
                     "real_send": False,
-                    "via": "blocked",
+                    "via": "open_chat",
                 }
-            else:
-                # 先登记“本桥接（AI）要发的这条”：探域日志常常在 send_text 返回之前
-                # 就已经回显了这条消息，等发送结果回来再登记就晚了（人工会被当成智能体）。
-                self._note_self_send(account, buyer_id, content)
-                cfg = dict(self.cfg)
-                if buyer_nick:
-                    cfg["_buyer_nick"] = buyer_nick
-                if self.pddbridge_source is not None:
-                    cfg["_pddbridge_source"] = self.pddbridge_source
-                # 分发按「活动数据源」而非配置意图: 自动降级后收发都走探域 DLL
-                cfg["_effective_source"] = self._effective_source
-                cfg["_command_is_expired"] = lambda cmd=cmd: self._command_expired(cmd)
-                started = time.monotonic()
-                try:
-                    result = self.platform.send_text(
-                        buyer_id,
-                        content,
-                        account,
-                        cfg=cfg,
-                        dry_run=bool(self.cfg.get("dry_run")),
-                    )
-                except Exception as exc:
-                    result = {
-                        "ok": False,
-                        "status": "indeterminate",
-                        "error": str(exc),
-                        "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
-                        "real_send": None,
-                        "via": "send_exception",
-                    }
-                # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
-                # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
-                # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
-                duration = time.monotonic() - started
-                if isinstance(result, dict) and result.get("real_send") is True:
-                    self._cmd_counters()["sent_ok"] += 1
-                log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
-                         command_id, duration,
-                         str((result or {}).get("status") or "") if isinstance(result, dict) else "",
-                         (result or {}).get("real_send") if isinstance(result, dict) else None,
-                         str((result or {}).get("via") or "") if isinstance(result, dict) else "")
-            if not isinstance(result, dict):
-                result = {"ok": bool(result), "raw_result": str(result or "")}
-            else:
-                result = dict(result)
-            result = _command_result_for_ack(result)
-            result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
-            if not self.command_journal.store_result(command_id, result):
-                self._last_error = self.command_journal.last_error
-            self._report_command_result(command_id, result)
+        # refuse pure ??? — usually encoding death, not a real reply
+        elif content and content.replace("?", "").strip() == "" and set(content) <= {"?"}:
+            result = {
+                "ok": False,
+                "status": "blocked",
+                "error": "content is only question marks",
+                "error_user": "发送内容异常（只有 ???），已拦截；请重新输入中文再发",
+                "real_send": False,
+                "via": "blocked",
+            }
+        else:
+            # 先登记“本桥接（AI）要发的这条”：探域日志常常在 send_text 返回之前
+            # 就已经回显了这条消息，等发送结果回来再登记就晚了（人工会被当成智能体）。
+            self._note_self_send(account, buyer_id, content)
+            cfg = dict(self.cfg)
+            if buyer_nick:
+                cfg["_buyer_nick"] = buyer_nick
+            if self.pddbridge_source is not None:
+                cfg["_pddbridge_source"] = self.pddbridge_source
+            # 分发按「活动数据源」而非配置意图: 自动降级后收发都走探域 DLL
+            cfg["_effective_source"] = self._effective_source
+            cfg["_command_is_expired"] = lambda cmd=cmd: self._command_expired(cmd)
+            started = time.monotonic()
+            try:
+                result = self.platform.send_text(
+                    buyer_id,
+                    content,
+                    account,
+                    cfg=cfg,
+                    dry_run=bool(self.cfg.get("dry_run")),
+                )
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "status": "indeterminate",
+                    "error": str(exc),
+                    "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
+                    "real_send": None,
+                    "via": "send_exception",
+                }
+            # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
+            # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
+            # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
+            duration = time.monotonic() - started
+            if isinstance(result, dict) and result.get("real_send") is True:
+                self._cmd_counters()["sent_ok"] += 1
+            log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
+                     command_id, duration,
+                     str((result or {}).get("status") or "") if isinstance(result, dict) else "",
+                     (result or {}).get("real_send") if isinstance(result, dict) else None,
+                     str((result or {}).get("via") or "") if isinstance(result, dict) else "")
+        if not isinstance(result, dict):
+            result = {"ok": bool(result), "raw_result": str(result or "")}
+        else:
+            result = dict(result)
+        result = _command_result_for_ack(result)
+        result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
+        if not self.command_journal.store_result(command_id, result):
+            self._last_error = self.command_journal.last_error
+        self._report_command_result(command_id, result)
 
     def _self_send_buffer(self) -> Deque[dict]:
         buf = getattr(self, "_self_sends", None)
@@ -1736,6 +1846,8 @@ class BridgeAgent:
                                  name="cmd-poll-%d" % _index, daemon=True).start()
             log.info("命令长轮询并发 %d 条（取指令间隔约 %.1fs -> 约 %.1fs）",
                      workers, 9.15 + wait, (9.15 + wait) / workers)
+        # 出站并发池：只有 command_sender_shop_ids 非空（灰度命中）才真的起线程。
+        self._start_sender_pool()
         log.info("命令长轮询已启动（wait_seconds=%.1f）。收到指令会打 "
                  "\"command <id> type=...\" 日志；一条都没有 = 指令没下来", wait)
         while not self._stop.is_set():
