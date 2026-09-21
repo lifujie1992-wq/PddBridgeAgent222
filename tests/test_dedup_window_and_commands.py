@@ -238,7 +238,11 @@ def bare_agent():
     v0.9.2 加计数时又踩了一次）。
     """
     agent = object.__new__(BridgeAgent)
-    agent.cfg = {"agent_id": "offline-test", "dry_run": False}
+    # 这些用例钉的是**串行执行路径**的语义（缺 id 计数、日志、过期判定），所以显式
+    # 关掉出站并发发送池，让 _handle_commands 就地执行、断言保持同步。
+    # 默认全开的并发路径由 tests/test_latency_p0.py 覆盖。
+    agent.cfg = {"agent_id": "offline-test", "dry_run": False,
+                 "command_sender_enabled": False}
     agent.platform = SimpleNamespace(name="pdd")
     agent._pending = deque()
     agent._pending_lock = threading.Lock()
