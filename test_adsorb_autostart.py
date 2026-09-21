@@ -8,7 +8,7 @@ import run_pdd_client
 
 
 def test_adsorb_autostart_defaults_enabled(tmp_path: Path) -> None:
-    assert run_pdd_client._adsorb_auto_start_enabled(tmp_path) is True
+    assert run_pdd_client._adsorb_auto_start_enabled(tmp_path) is False
 
 
 def test_adsorb_autostart_can_be_disabled(tmp_path: Path) -> None:
@@ -20,6 +20,9 @@ def test_adsorb_autostart_can_be_disabled(tmp_path: Path) -> None:
 
 
 def test_start_adsorb_uses_bundle_companion(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pdd_adsorb_config.json").write_text(
+        json.dumps({"auto_start_with_bridge": True}), encoding="utf-8"
+    )
     executable = tmp_path / "PddAdsorbWindow.exe"
     executable.write_bytes(b"MZ")
     calls: list[tuple[list[str], dict]] = []
@@ -42,6 +45,9 @@ def test_start_adsorb_uses_bundle_companion(tmp_path: Path, monkeypatch) -> None
 
 
 def test_start_adsorb_does_not_duplicate_existing_instance(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pdd_adsorb_config.json").write_text(
+        json.dumps({"auto_start_with_bridge": True}), encoding="utf-8"
+    )
     executable = tmp_path / "PddAdsorbWindow.exe"
     executable.write_bytes(b"MZ")
     monkeypatch.setattr(run_pdd_client, "_running_adsorb_pid", lambda *_: 7788)

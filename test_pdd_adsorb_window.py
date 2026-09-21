@@ -102,7 +102,7 @@ def test_operator_minimized_dock_stays_minimized(monkeypatch) -> None:
 def test_edge_pids_include_same_profile_processes(monkeypatch) -> None:
     app = DockedWindow({})
     app.edge = None
-    monkeypatch.setattr(adsorb, "profile_edge_processes", lambda _profile: [type("P", (), {"pid": 77})()])
+    monkeypatch.setattr(adsorb, "profile_browser_processes", lambda _profile: [type("P", (), {"pid": 77})()])
 
     assert app.edge_pids() == {77}
 
@@ -115,7 +115,7 @@ def test_failed_controller_preserves_live_dock(monkeypatch) -> None:
     )
     monkeypatch.setattr(Win32, "windows", lambda: [])
     calls = []
-    monkeypatch.setattr(adsorb, "stop_profile_edge", lambda _profile: calls.append("stop"))
+    monkeypatch.setattr(adsorb, "stop_profile_browser", lambda _profile: calls.append("stop"))
     monkeypatch.setattr(Win32.user32, "PostMessageW", lambda *_args: calls.append("close"))
 
     app.close(preserve_live_dock=True)
@@ -137,3 +137,65 @@ def test_pin_off_applies_not_topmost(monkeypatch) -> None:
     app.apply_window_state(dock, dock.rect, {"pin": False, "adsorb": True})
 
     assert calls[0][1].value == Win32.HWND_NOTOPMOST.value
+
+
+def _fake_exe(path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"MZ")
+
+
+def test_bundled_chromium_wins_over_system_browsers(tmp_path, monkeypatch) -> None:
+    bundled = tmp_path / "chromium" / "chrome.exe"
+    _fake_exe(bundled)
+    monkeypatch.setattr(adsorb, "ROOT", tmp_path)
+
+    assert adsorb.find_browser({}) == bundled
+
+
+def test_bundled_chromium_wins_over_config(tmp_path, monkeypatch) -> None:
+    """显式配置优先级最高。"""
+    bundled = tmp_path / "chromium" / "chrome.exe"
+    _fake_exe(bundled)
+    explicit = tmp_path / "my-chrome.exe"
+    _fake_exe(explicit)
+    monkeypatch.setattr(adsorb, "ROOT", tmp_path)
+
+    assert adsorb.find_browser({"browser_path": str(explicit)}) == explicit
+
+
+def test_missing_configured_path_falls_through_to_bundle(tmp_path, monkeypatch) -> None:
+    bundled = tmp_path / "chromium" / "chrome.exe"
+    _fake_exe(bundled)
+    monkeypatch.setattr(adsorb, "ROOT", tmp_path)
+
+    assert adsorb.find_browser({"browser_path": str(tmp_path / "gone.exe")}) == bundled
+
+
+def test_falls_back_to_system_browser_when_bundle_absent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(adsorb, "ROOT", tmp_path)
+    root = tmp_path / "system"
+    _fake_exe(root / "Google" / "Chrome" / "Application" / "chrome.exe")
+    monkeypatch.setenv("PROGRAMFILES", str(root))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    assert adsorb.find_browser({}).name == "chrome.exe"
+
+
+def test_no_browser_anywhere_raises(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(adsorb, "ROOT", tmp_path)
+    monkeypatch.setattr(adsorb, "SYSTEM_BROWSER_ROOTS", ())
+
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        adsorb.find_browser({})
+
+
+def test_profile_dir_is_per_browser(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(adsorb, "STATE_DIR", tmp_path)
+    chrome = tmp_path / "chrome.exe"
+    _fake_exe(chrome)
+    monkeypatch.setattr(adsorb, "_BROWSER", chrome)
+
+    assert adsorb.profile_dir() == tmp_path / "pdd-adsorb-chrome-profile"

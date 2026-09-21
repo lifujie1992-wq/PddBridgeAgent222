@@ -991,15 +991,15 @@ def _root() -> Path:
 def _adsorb_auto_start_enabled(root: Path | None = None) -> bool:
     config_path = (root or _root()) / "pdd_adsorb_config.json"
     if not config_path.is_file():
-        return True
+        return False
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         log.warning("ignoring invalid adsorb config %s: %s", config_path, exc)
-        return True
+        return False
     if not isinstance(payload, dict):
-        return True
-    return payload.get("auto_start_with_bridge", True) is not False
+        return False
+    return payload.get("auto_start_with_bridge", False) is True
 
 
 def _running_adsorb_pid(root: Path, executable: Path) -> int | None:

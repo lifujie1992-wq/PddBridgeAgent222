@@ -35,3 +35,6 @@ runtime/
 
 # 构建日志（含本机路径）
 build-log-*.txt
+
+# 本机构建脚本（含本机真实路径；仓库里跟踪的 .iss 一律脱敏成 C:\Users\user\...）
+installer/_local_build.iss
