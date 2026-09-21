@@ -1135,8 +1135,13 @@ class BridgeAgent:
     # 背景（0.7.5 r2 的 P0）：一条回复要等平台回执，实测最长 10s，所以单线程出站的
     # 上限只有约 6 条/分钟/工位，而峰值需要约 38 条/分钟/工位。把「取指令」与「发送」
     # 解耦，取指令循环就不再被上一条的发送确认超时占住。
-    # 灰度：`command_sender_shop_ids` 白名单命中才走池子，默认 [] = 完全关闭（fail closed）；
-    # 未命中、池子写满（背压）都退回原来的串行路径，行为与改动前一致。
+    #
+    # 开关：**owner 2026-09-21 明确决定「默认全开」**（不是仓库默认的 fail-closed
+    # 白名单）。判定顺序固定为：
+    #   1) command_sender_enabled = false               -> 全关（回到改动前行为）
+    #   2) 店铺在 command_sender_disabled_shop_ids 里    -> 只关这个店
+    #   3) command_sender_shop_ids 非空                  -> 只有命中的店铺开（窄灰度）
+    #   4) 否则                                         -> 开
     def _ensure_sender_state(self) -> None:
         """惰性初始化发送池状态（兼容绕过 __init__ 的构造路径）。"""
         if getattr(self, "_sender_queue", None) is None:
@@ -1156,13 +1161,28 @@ class BridgeAgent:
             return []
         return [str(item or "").strip() for item in allowlist if str(item or "").strip()]
 
+    @staticmethod
+    def _shop_in_list(value: Any, shop_id: str) -> bool:
+        if not shop_id or not isinstance(value, (list, tuple, set)):
+            return False
+        allowed = {str(item or "").strip() for item in value if str(item or "").strip()}
+        return shop_id in allowed
+
+    def _command_sender_on(self) -> bool:
+        """总开关（默认开）。false 时整条并发发送路径完全不启用。"""
+        return bool(self.cfg.get("command_sender_enabled", True))
+
     def _command_sender_enabled(self, account: Any) -> bool:
-        """店铺级灰度：本店铺的出站发送是否交给并发发送池。默认关闭。"""
-        allowed = set(self._command_sender_shop_ids())
-        if not allowed:
+        """这个店铺的出站发送是否交给并发发送池（默认开，可总关 / 单店关 / 窄白名单）。"""
+        if not self._command_sender_on():
             return False
         shop_id = str(self._account_shop_id(account) or "").strip()
-        return bool(shop_id and shop_id in allowed)
+        if self._shop_in_list(self.cfg.get("command_sender_disabled_shop_ids"), shop_id):
+            return False
+        allowlist = self._command_sender_shop_ids()
+        if allowlist:
+            return self._shop_in_list(allowlist, shop_id)
+        return True
 
     def _sender_conversation_lock(self, account: Any, buyer_id: Any) -> threading.Lock:
         """同一买家保持串行，避免并行发送打乱回复顺序。"""
@@ -1193,9 +1213,9 @@ class BridgeAgent:
                 self._sender_queue.task_done()
 
     def _start_sender_pool(self) -> None:
-        """启动并发发送池。幂等、线程安全；未开灰度时一个线程都不建。"""
+        """启动并发发送池。幂等、线程安全；总开关关掉时一个线程都不建。"""
         self._ensure_sender_state()
-        if not self._command_sender_shop_ids():
+        if not self._command_sender_on():
             return
         with self._sender_pool_guard:
             if self._sender_threads:
@@ -1213,8 +1233,10 @@ class BridgeAgent:
                 )
                 thread.start()
                 self._sender_threads.append(thread)
-            log.info("出站并发发送池已启动：%d 个 worker，灰度店铺 %s",
-                     workers, ", ".join(self._command_sender_shop_ids()))
+            log.info("出站并发发送池已启动：%d 个 worker，范围=%s",
+                     workers,
+                     ("窄白名单 " + ", ".join(self._command_sender_shop_ids()))
+                     if self._command_sender_shop_ids() else "全部店铺（默认全开）")
 
     def _apply_session_state(self, cmd: dict) -> dict:
         """把中心下发的会话状态（转人工 / AI 开关）落地到本机工作台。
@@ -1624,9 +1646,11 @@ class BridgeAgent:
                     "real_send": None,
                     "via": "send_exception",
                 }
-            # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
-            # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
-            # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
+            # 出站默认由并发发送池执行（command_sender_enabled，默认开）；只有
+            # enabled=false 或该店铺被 disabled_shop_ids 排除时才回到单线程串行。
+            # 单线程时这条耗时直接决定“AI 回复吞吐”上限：容量 ≈ 1 / 平均耗时。
+            # 实测日志里一半以上的指令→回显超过 10s，需要区分是“探域 DLL 慢”
+            # 还是“发送确认没匹配上干等到超时”。
             duration = time.monotonic() - started
             if isinstance(result, dict) and result.get("real_send") is True:
                 self._cmd_counters()["sent_ok"] += 1

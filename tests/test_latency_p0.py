@@ -84,14 +84,31 @@ def test_shop_id_allowlist_is_fail_closed():
     assert _shop_id_allowlist(["mall_1", " mall_2 ", "mall_1"]) == ["mall_1", "mall_2"]
 
 
-def test_config_defaults_are_gray_off(tmp_path):
-    """没有这两个键的配置 = 两个灰度都关，worker 数取默认 6。"""
+def test_config_defaults_are_all_on(tmp_path):
+    """没配任何键 = 两个特性**默认全开**（owner 2026-09-21 决定）；worker 数默认 6。"""
     cfg_path = tmp_path / "bridge_config.json"
     cfg_path.write_text(json.dumps({"platform": "pdd", "agent_id": "x"}), encoding="utf-8")
     cfg = load_config(cfg_path)
+    assert cfg["immediate_ingress_enabled"] is True
+    assert cfg["command_sender_enabled"] is True
     assert cfg["immediate_ingress_shop_ids"] == []
+    assert cfg["immediate_ingress_disabled_shop_ids"] == []
     assert cfg["command_sender_shop_ids"] == []
+    assert cfg["command_sender_disabled_shop_ids"] == []
     assert cfg["command_sender_workers"] == 6
+
+
+def test_config_kill_switch_parses_string_false(tmp_path):
+    """`"false"` 这种字符串必须解析成关（`bool("false")` 是 True 是经典坑）。"""
+    cfg_path = tmp_path / "bridge_config.json"
+    cfg_path.write_text(json.dumps({
+        "platform": "pdd", "agent_id": "x",
+        "immediate_ingress_enabled": "false",
+        "command_sender_enabled": "0",
+    }), encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert cfg["immediate_ingress_enabled"] is False
+    assert cfg["command_sender_enabled"] is False
 
 
 def test_config_keeps_explicit_allowlist(tmp_path):
@@ -100,11 +117,13 @@ def test_config_keeps_explicit_allowlist(tmp_path):
         "platform": "pdd", "agent_id": "x",
         "immediate_ingress_shop_ids": ["mall_150792824"],
         "command_sender_shop_ids": ["mall_150792824", " mall_209064850 "],
+        "command_sender_disabled_shop_ids": ["mall_740422004"],
         "command_sender_workers": 3,
     }), encoding="utf-8")
     cfg = load_config(cfg_path)
     assert cfg["immediate_ingress_shop_ids"] == ["mall_150792824"]
     assert cfg["command_sender_shop_ids"] == ["mall_150792824", "mall_209064850"]
+    assert cfg["command_sender_disabled_shop_ids"] == ["mall_740422004"]
     assert cfg["command_sender_workers"] == 3
 
 
@@ -123,34 +142,71 @@ def test_config_rejects_string_allowlist(tmp_path):
 
 # -------------------------------------------------------------- 出站并发池（r2）
 
-def test_command_sender_gray_is_fail_closed(tmp_path):
-    assert make_agent(tmp_path)._command_sender_enabled("cs_427302374:1") is False
+def test_command_sender_defaults_to_all_shops(tmp_path):
+    """默认全开：没配任何键时，任何店铺都走并发发送池。"""
+    agent = make_agent(tmp_path)
+    assert agent._command_sender_enabled("cs_427302374:1") is True
+    assert agent._command_sender_enabled("cs_150792824:167471952") is True
     assert make_agent(tmp_path, command_sender_shop_ids=[])._command_sender_enabled(
-        "cs_427302374:1") is False
-    assert make_agent(tmp_path, command_sender_shop_ids="mall_427302374")._command_sender_enabled(
-        "cs_427302374:1") is False
+        "cs_427302374:1") is True
 
 
-def test_command_sender_gray_matches_only_allowlisted_shop(tmp_path):
+def test_command_sender_kill_switch_off(tmp_path):
+    """总开关一关，所有店铺都回到串行路径。"""
+    agent = make_agent(tmp_path, command_sender_enabled=False)
+    assert agent._command_sender_enabled("cs_427302374:1") is False
+    assert agent._command_sender_enabled("cs_150792824:167471952") is False
+
+
+def test_command_sender_per_shop_exclusion(tmp_path):
+    """单店回退：只关掉名单里的店，其它店不受影响。"""
+    agent = make_agent(tmp_path, command_sender_disabled_shop_ids=["mall_150792824"])
+    assert agent._command_sender_enabled("cs_150792824:167471952") is False
+    assert agent._command_sender_enabled("cs_427302374:164945148") is True
+
+
+def test_command_sender_allowlist_narrows_scope(tmp_path):
+    """配了非空白名单 = 退化成窄灰度，只有命中的店铺开。"""
     agent = make_agent(tmp_path, command_sender_shop_ids=["mall_427302374"])
     assert agent._command_sender_enabled("cs_427302374:164945148") is True
     assert agent._command_sender_enabled("cs_150792824:167471952") is False
 
 
-def test_sender_pool_not_started_when_gray_off(tmp_path):
-    """默认关时一个发送线程都不许起（否则等于偷偷改了线上行为）。"""
-    agent = make_agent(tmp_path)
+def test_command_sender_disabled_beats_allowlist(tmp_path):
+    """同一个店同时出现在白名单和禁用名单里时，禁用优先（回退优先）。"""
+    agent = make_agent(tmp_path, command_sender_shop_ids=["mall_427302374"],
+                       command_sender_disabled_shop_ids=["mall_427302374"])
+    assert agent._command_sender_enabled("cs_427302374:164945148") is False
+
+
+def test_command_sender_rejects_string_allowlist(tmp_path):
+    """裸字符串白名单不是"整店放行"，而是当成无效值忽略。"""
+    agent = make_agent(tmp_path, command_sender_shop_ids="mall_427302374")
+    assert agent._command_sender_enabled("cs_427302374:164945148") is True  # 默认全开
+
+
+def test_sender_pool_not_started_when_kill_switch_off(tmp_path):
+    """总开关关掉时一个发送线程都不许起（否则等于偷偷改了线上行为）。"""
+    agent = make_agent(tmp_path, command_sender_enabled=False)
     agent._start_sender_pool()
     assert agent._sender_threads == []
 
 
+def test_sender_pool_starts_by_default(tmp_path):
+    """默认全开：不配任何键也要真的把池子起起来。"""
+    agent = make_agent(tmp_path)
+    agent._start_sender_pool()
+    assert len(agent._sender_threads) == 6, "默认 6 个 worker"
+    agent._stop.set()
+
+
 def test_sender_pool_starts_once_and_clamps_workers(tmp_path):
-    agent = make_agent(tmp_path, command_sender_shop_ids=["mall_427302374"],
-                       command_sender_workers=99)
+    agent = make_agent(tmp_path, command_sender_workers=99)
     agent._start_sender_pool()
     assert len(agent._sender_threads) == 8, "worker 数必须收敛到 1..8"
     agent._start_sender_pool()
     assert len(agent._sender_threads) == 8, "重复调用必须幂等，不能越起越多"
+    agent._stop.set()
 
 
 def _install_fake_pull(agent, commands):
@@ -159,7 +215,8 @@ def _install_fake_pull(agent, commands):
     agent._skip_result_retry = True
 
 
-def test_handle_commands_pools_gray_shop_and_inlines_the_rest(tmp_path):
+def test_handle_commands_pools_allowlisted_and_inlines_the_rest(tmp_path):
+    """配了窄白名单时：命中的投池，未命中的原样串行。"""
     agent = make_agent(tmp_path, command_sender_shop_ids=["mall_427302374"])
     inline = []
     agent._execute_command = lambda cmd: inline.append(cmd["id"])
@@ -173,12 +230,32 @@ def test_handle_commands_pools_gray_shop_and_inlines_the_rest(tmp_path):
     queued = []
     while not agent._sender_queue.empty():
         queued.append(agent._sender_queue.get_nowait()["id"])
-    assert queued == ["cmd-gray"], "命中灰度的店必须进池子"
+    assert queued == ["cmd-gray"], "命中白名单的店必须进池子"
     assert inline == ["cmd-legacy"], "未命中的店必须原样串行执行"
 
 
-def test_handle_commands_is_fully_inline_when_gray_off(tmp_path):
+def test_handle_commands_pools_everything_by_default(tmp_path):
+    """默认全开：不配任何键时所有店铺都投池，一条都不走串行。"""
     agent = make_agent(tmp_path)
+    inline = []
+    agent._execute_command = lambda cmd: inline.append(cmd["id"])
+    _install_fake_pull(agent, [
+        {"id": "cmd-a", "account": "cs_427302374:164945148",
+         "buyer_id": "b-1", "content": "hi", "type": "send_text"},
+        {"id": "cmd-b", "account": "cs_150792824:167471952",
+         "buyer_id": "b-2", "content": "hi", "type": "send_text"},
+    ])
+    BridgeAgent._handle_commands(agent, wait_seconds=0.0)
+    queued = []
+    while not agent._sender_queue.empty():
+        queued.append(agent._sender_queue.get_nowait()["id"])
+    assert queued == ["cmd-a", "cmd-b"]
+    assert inline == []
+
+
+def test_handle_commands_is_fully_inline_when_kill_switch_off(tmp_path):
+    """总开关关掉 = 完全回到改动前的串行路径。"""
+    agent = make_agent(tmp_path, command_sender_enabled=False)
     inline = []
     agent._execute_command = lambda cmd: inline.append(cmd["id"])
     _install_fake_pull(agent, [
@@ -188,6 +265,25 @@ def test_handle_commands_is_fully_inline_when_gray_off(tmp_path):
     BridgeAgent._handle_commands(agent, wait_seconds=0.0)
     assert inline == ["cmd-a"]
     assert agent._sender_queue.empty()
+
+
+def test_handle_commands_inlines_excluded_shop(tmp_path):
+    """单店回退：被排除的店走串行，其它店照常投池。"""
+    agent = make_agent(tmp_path, command_sender_disabled_shop_ids=["mall_150792824"])
+    inline = []
+    agent._execute_command = lambda cmd: inline.append(cmd["id"])
+    _install_fake_pull(agent, [
+        {"id": "cmd-excluded", "account": "cs_150792824:167471952",
+         "buyer_id": "b-2", "content": "hi", "type": "send_text"},
+        {"id": "cmd-normal", "account": "cs_427302374:164945148",
+         "buyer_id": "b-1", "content": "hi", "type": "send_text"},
+    ])
+    BridgeAgent._handle_commands(agent, wait_seconds=0.0)
+    queued = []
+    while not agent._sender_queue.empty():
+        queued.append(agent._sender_queue.get_nowait()["id"])
+    assert queued == ["cmd-normal"]
+    assert inline == ["cmd-excluded"]
 
 
 def test_sender_pool_falls_back_inline_when_saturated(tmp_path):
@@ -245,10 +341,11 @@ def test_sender_pool_keeps_per_conversation_order(tmp_path):
 
 # ---------------------------------------------------------------- 即时上传（r1）
 
-def test_ingress_gray_shop_is_not_held_by_context_gate(tmp_path):
+def test_ingress_default_on_is_not_held_by_context_gate(tmp_path):
+    """默认全开：不配任何键，买家消息也不被订单上下文门控扣住。"""
     run_pdd_client.install_local_first()
-    agent = make_agent(tmp_path, immediate_ingress_shop_ids=["mall_427302374"])
-    agent._on_local_event(buyer_message("gray-1"))
+    agent = make_agent(tmp_path)
+    agent._on_local_event(buyer_message("all-1"))
     event_id = str(agent._pending[0]["event_id"])
     # 不进 blocked 集合 -> flush_events() 拦不住它，原始消息立即上传
     assert event_id not in agent._pdd_context_pending_ids
@@ -256,27 +353,68 @@ def test_ingress_gray_shop_is_not_held_by_context_gate(tmp_path):
     assert agent._pdd_context_queue.qsize() == 1
 
 
-def test_ingress_non_gray_shop_is_still_gated(tmp_path):
+def test_ingress_kill_switch_restores_gate(tmp_path):
+    """总开关关掉 = 完全回到改动前的门控行为。"""
     run_pdd_client.install_local_first()
-    agent = make_agent(tmp_path)
+    agent = make_agent(tmp_path, immediate_ingress_enabled=False)
     agent._on_local_event(buyer_message("legacy-1"))
     event_id = str(agent._pending[0]["event_id"])
     assert event_id in agent._pdd_context_pending_ids
 
 
-def test_ingress_gray_is_fail_closed_on_string_allowlist(tmp_path):
+def test_ingress_excluded_shop_is_still_gated(tmp_path):
+    """单店回退：名单里的店回到门控，其它店照常即时上传。"""
+    run_pdd_client.install_local_first()
+    agent = make_agent(tmp_path, immediate_ingress_disabled_shop_ids=["mall_427302374"])
+    agent._on_local_event(buyer_message("excl-1"))
+    excluded = str(agent._pending[0]["event_id"])
+    assert excluded in agent._pdd_context_pending_ids
+    agent._on_local_event(buyer_message("other-1", account="cs_150792824:167471952"))
+    other = str(agent._pending[1]["event_id"])
+    assert other not in agent._pdd_context_pending_ids
+
+
+def test_ingress_allowlist_narrows_scope(tmp_path):
+    """配了非空白名单 = 退化成窄灰度：只有命中的店铺即时上传。"""
+    run_pdd_client.install_local_first()
+    agent = make_agent(tmp_path, immediate_ingress_shop_ids=["mall_427302374"])
+    agent._on_local_event(buyer_message("narrow-1"))
+    hit = str(agent._pending[0]["event_id"])
+    assert hit not in agent._pdd_context_pending_ids
+    agent._on_local_event(buyer_message("narrow-2", account="cs_150792824:167471952"))
+    miss = str(agent._pending[1]["event_id"])
+    assert miss in agent._pdd_context_pending_ids
+
+
+def test_ingress_ignores_string_allowlist(tmp_path):
+    """裸字符串白名单是无效值 -> 按默认（全开）处理，而不是误当成单元素白名单。"""
     run_pdd_client.install_local_first()
     agent = make_agent(tmp_path, immediate_ingress_shop_ids="mall_427302374")
     agent._on_local_event(buyer_message("str-1"))
     event_id = str(agent._pending[0]["event_id"])
-    assert event_id in agent._pdd_context_pending_ids
+    assert event_id not in agent._pdd_context_pending_ids
 
 
-def test_immediate_ingress_enabled_matches_only_allowlisted_shop(tmp_path):
-    agent = make_agent(tmp_path, immediate_ingress_shop_ids=["mall_427302374"])
-    assert run_pdd_client.immediate_ingress_enabled(agent, "cs_427302374:164945148") is True
-    assert run_pdd_client.immediate_ingress_enabled(agent, "cs_150792824:167471952") is False
-    assert run_pdd_client.immediate_ingress_enabled(make_agent(tmp_path), "cs_427302374:1") is False
+def test_immediate_ingress_gate_matrix(tmp_path):
+    """四个判定层级：总开关 > 单店禁用 > 窄白名单 > 默认开。"""
+    gate = run_pdd_client.immediate_ingress_enabled
+    other = "cs_150792824:167471952"
+    # 默认开
+    assert gate(make_agent(tmp_path), "cs_427302374:164945148") is True
+    # 总开关
+    assert gate(make_agent(tmp_path, immediate_ingress_enabled=False), "cs_427302374:1") is False
+    # 单店禁用
+    off = make_agent(tmp_path, immediate_ingress_disabled_shop_ids=["mall_150792824"])
+    assert gate(off, other) is False
+    assert gate(off, "cs_427302374:164945148") is True
+    # 窄白名单
+    narrow = make_agent(tmp_path, immediate_ingress_shop_ids=["mall_427302374"])
+    assert gate(narrow, "cs_427302374:164945148") is True
+    assert gate(narrow, other) is False
+    # 禁用优先于白名单（回退优先）
+    both = make_agent(tmp_path, immediate_ingress_shop_ids=["mall_427302374"],
+                      immediate_ingress_disabled_shop_ids=["mall_427302374"])
+    assert gate(both, "cs_427302374:164945148") is False
 
 
 def test_enrichment_event_is_deterministic_and_shares_msg_id(tmp_path):

@@ -432,17 +432,35 @@ def context_update_event(event: dict) -> dict:
     return updated
 
 
-def immediate_ingress_enabled(agent, account: str) -> bool:
-    """店铺级灰度：命中白名单时，消息不再被订单上下文门控扣住。默认关闭。
-
-    fail closed：键缺失 / `[]` / 字符串 / 其它非列表值一律视为关闭。
-    """
-    allowlist = agent.cfg.get("immediate_ingress_shop_ids")
-    if not isinstance(allowlist, (list, tuple, set)) or not allowlist:
+def _shop_in_list(value, shop_id: str) -> bool:
+    """店铺 ID 是否在给定的字符串列表里（非列表 / 空值一律 False）。"""
+    if not shop_id or not isinstance(value, (list, tuple, set)):
         return False
-    allowed = {str(item or "").strip() for item in allowlist if str(item or "").strip()}
+    allowed = {str(item or "").strip() for item in value if str(item or "").strip()}
+    return shop_id in allowed
+
+
+def immediate_ingress_enabled(agent, account: str) -> bool:
+    """即时上传是否对这个店铺生效。
+
+    **owner 2026-09-21 明确决定「默认全开」**（不是仓库默认的 fail-closed
+    白名单）。为了仍然能一键 / 单店回退，判定顺序固定为：
+
+      1) `immediate_ingress_enabled = false`        -> 全关（回到改动前行为）
+      2) 店铺在 `immediate_ingress_disabled_shop_ids` -> 只关这个店
+      3) `immediate_ingress_shop_ids` 非空           -> 只有命中的店铺开（窄灰度）
+      4) 否则                                        -> 开
+    """
+    cfg = agent.cfg
+    if not bool(cfg.get("immediate_ingress_enabled", True)):
+        return False
     shop_id = str(agent._account_shop_id(account) or "").strip()
-    return bool(shop_id and shop_id in allowed)
+    if _shop_in_list(cfg.get("immediate_ingress_disabled_shop_ids"), shop_id):
+        return False
+    allowlist = cfg.get("immediate_ingress_shop_ids")
+    if isinstance(allowlist, (list, tuple, set)) and allowlist:
+        return _shop_in_list(allowlist, shop_id)
+    return True
 
 
 def enrichment_event(agent, event_id: str, enriched: dict) -> dict:

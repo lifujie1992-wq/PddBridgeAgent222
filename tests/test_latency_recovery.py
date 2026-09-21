@@ -104,7 +104,9 @@ def test_auto_command_expires_while_previous_command_is_executing(tmp_path):
         now[0] += 91
         return {'ok': True, 'status': 'confirmed', 'real_send': True}
     agent = object.__new__(BridgeAgent)
-    agent.cfg = {'dry_run': False}
+    # 这条用例钉的是「上一条还在串行发送时，第二条已经过期」的串行语义，
+    # 所以显式关掉出站并发发送池；并发路径由 tests/test_latency_p0.py 覆盖。
+    agent.cfg = {'dry_run': False, 'command_sender_enabled': False}
     agent.client = SimpleNamespace(pull_commands=lambda **kwargs: commands, server_now=lambda: now[0])
     agent.command_journal = CommandJournal(tmp_path / 'commands.json')
     agent._retry_command_results = lambda: None

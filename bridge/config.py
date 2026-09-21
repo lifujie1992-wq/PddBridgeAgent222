@@ -331,15 +331,26 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "upload_batch_size": int(data.get("upload_batch_size") or 500),
         "upload_concurrency": int(data.get("upload_concurrency") or 6),
         "upload_drain_budget_seconds": float(data.get("upload_drain_budget_seconds") or 3.0),
-        # 灰度（默认全关，fail closed）：只有白名单命中的店铺才走新路径。
-        #   immediate_ingress_shop_ids —— 命中时买家消息不再被订单上下文门控扣住，
-        #     原始消息立即上传，订单上下文随后按同一个 msg_id 补发一条增强事件；
-        #     中心按 msg_id 判重，只有首次插入才会入队 AI 任务，不会二次回复。
-        #   command_sender_shop_ids / command_sender_workers —— 命中时出站发送交给
-        #     并发发送池，取指令循环不再被上一条的发送确认超时（默认 10s）占住；
-        #     同一买家仍由逐会话锁保证有序。
+        # 两个 P0 时延特性的开关。**owner 2026-09-21 明确决定「默认全开」**
+        # （不是仓库默认的 fail-closed 白名单），所以这里默认 True；为了仍然能
+        # 一键回退 / 单店回退，判定顺序固定为：
+        #   1) *_enabled = false                -> 全关（回到改动前的行为）
+        #   2) 店铺在 *_disabled_shop_ids 里      -> 只关这个店
+        #   3) *_shop_ids 非空                    -> 只有命中的店铺开（做窄灰度用）
+        #   4) 否则                              -> 开
+        #   immediate_ingress 命中时：买家消息不再被订单上下文门控扣住，原始消息
+        #     立即上传，订单上下文随后按同一个 msg_id 补发一条增强事件；中心按
+        #     msg_id 判重，只有首次插入才会入队 AI 任务，不会二次回复。
+        #   command_sender 命中时：出站发送交给并发发送池，取指令循环不再被上一条
+        #     的发送确认超时（默认 10s）占住；同一买家仍由逐会话锁保证有序。
+        "immediate_ingress_enabled": as_bool(data.get("immediate_ingress_enabled"), True),
         "immediate_ingress_shop_ids": _shop_id_allowlist(data.get("immediate_ingress_shop_ids")),
+        "immediate_ingress_disabled_shop_ids": _shop_id_allowlist(
+            data.get("immediate_ingress_disabled_shop_ids")),
+        "command_sender_enabled": as_bool(data.get("command_sender_enabled"), True),
         "command_sender_shop_ids": _shop_id_allowlist(data.get("command_sender_shop_ids")),
+        "command_sender_disabled_shop_ids": _shop_id_allowlist(
+            data.get("command_sender_disabled_shop_ids")),
         "command_sender_workers": int(data.get("command_sender_workers") or 6),
         "outgoing_dedup_seconds": float(data.get("outgoing_dedup_seconds") or 60.0),
         # 中心 WS 上行通道（protocol_version 1）。默认关：灰度按机器打开，连接失败
@@ -568,9 +579,14 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "upload_batch_size": 500,
         "upload_concurrency": 6,
         "upload_drain_budget_seconds": 3.0,
-        # 灰度（默认全关）：白名单命中的店铺才走即时上传 / 并发发送池。
+        # 两个 P0 时延特性：默认全开；*_enabled=false 一键回退，
+        # *_disabled_shop_ids 单店回退，*_shop_ids 非空时退化成窄白名单灰度。
+        "immediate_ingress_enabled": True,
         "immediate_ingress_shop_ids": [],
+        "immediate_ingress_disabled_shop_ids": [],
+        "command_sender_enabled": True,
         "command_sender_shop_ids": [],
+        "command_sender_disabled_shop_ids": [],
         "command_sender_workers": 6,
         "outgoing_dedup_seconds": 60.0,
         "history_pull_seconds": 0,
