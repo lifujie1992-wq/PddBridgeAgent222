@@ -383,25 +383,6 @@ def _platform_time_key(value: Any) -> str:
 
 
 def _extract_account(line: str) -> str:
-    """取这一行日志里**属于这条消息自己**的席位账号。
-
-    优先读行内显式声明的 account —— logrus 行是 JSON，顶层就带 "account" 字段，
-    那是权威值，直接用。**不要靠正则扫整行去猜**：本机探域会替别的电脑登录的店铺
-    代发消息，一行里同时出现本机席位和远端席位的 cs_id 时，扫到哪个纯看文本先后
-    （浮窗串台就是这么来的）。
-
-    只有拿不到显式字段时才回退到整行扫描 —— 老格式行没有这个字段。
-    """
-    text = line.lstrip()
-    if text.startswith("{"):
-        try:
-            parsed = json.loads(text)
-        except (ValueError, TypeError):
-            parsed = None
-        if isinstance(parsed, dict):
-            explicit = _canonical_account(parsed.get("account") or "")
-            if explicit and ACCOUNT_RE.fullmatch(explicit):
-                return explicit
     m = ACCOUNT_RE.search(line)
     return _canonical_account(m.group(0)) if m else ""
 
@@ -1077,7 +1058,7 @@ def parse_line(line: str, source: str = "plugin") -> List[Dict[str, Any]]:
     for blob in blobs:
         results.extend(_parse_blob(blob, source, account_hint))
 
-    # Plugin success lines (拼多多 only — 千牛回执会污染成短 buyer_id 第二会话)
+    # Plugin success lines (拼多多 only)
     if "Send_Seller_Msg_Success" in line or "Send_Robot_Msg" in line:
         bid = re.search(r"buyer_id:(\d+)", line)
         acc = re.search(r"cs_id:([^\s]+)", line)
@@ -1087,7 +1068,7 @@ def parse_line(line: str, source: str = "plugin") -> List[Dict[str, Any]]:
             line,
         )
         account = _canonical_account(acc.group(1) if acc else account_hint)
-        # Skip non-PDD seats (旺旺 nick / empty) — those belong to Qianniu bridge
+        # Skip non-PDD seats (旺旺 nick / empty) — 其他平台的消息不归本客户端
         if account and not str(account).startswith("cs_"):
             account = ""
         if bid and account.startswith("cs_") and msg:

@@ -239,6 +239,9 @@ class PddOrderContextLookup:
         self._process_iter = process_iter or psutil.process_iter
         self._lock = threading.RLock()
         self._target_cache: Dict[str, tuple[float, str]] = {}
+        # 复用 CDP WebSocket 连接：按目标缓存 (connection, connection_lock)，
+        # 免掉每次查询的握手开销；connection_lock 保证同一连接不并发收发。
+        self._connections: Dict[str, tuple] = {}
 
     def _debug_ports(self) -> List[int]:
         ports: set[int] = set()
@@ -289,106 +292,147 @@ class PddOrderContextLookup:
                     targets.append(websocket_url)
         return targets
 
-    def _evaluate(self, websocket_url: str, expression: str, deadline: float) -> dict:
+    def _connection_for(self, websocket_url: str, deadline: float) -> tuple:
         import websocket  # type: ignore
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("context_deadline_exceeded")
-        connection = websocket.create_connection(
-            websocket_url,
-            timeout=remaining,
-            suppress_origin=True,
-        )
-        try:
-            request_id = int(time.time_ns() % 1_000_000_000)
-            connection.settimeout(max(0.001, deadline - time.monotonic()))
-            connection.send(json.dumps({
-                "id": request_id,
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": expression,
-                    "returnByValue": True,
-                    "awaitPromise": True,
-                },
-            }))
-            while time.monotonic() < deadline:
-                connection.settimeout(max(0.001, deadline - time.monotonic()))
-                packet = json.loads(connection.recv())
-                if packet.get("id") != request_id:
-                    continue
-                if packet.get("error"):
-                    raise RuntimeError("cdp_protocol_error")
-                remote = packet.get("result", {}).get("result", {})
-                if remote.get("subtype") == "error" or packet.get("result", {}).get("exceptionDetails"):
-                    raise RuntimeError("cdp_javascript_error")
-                value = remote.get("value")
-                if not isinstance(value, dict):
-                    raise RuntimeError("cdp_invalid_value")
-                return value
-            raise TimeoutError("cdp_timeout")
-        finally:
-            connection.close()
+        with self._lock:
+            entry = self._connections.get(websocket_url)
+            if entry is not None:
+                return entry
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("context_deadline_exceeded")
+            entry = (
+                websocket.create_connection(
+                    websocket_url,
+                    timeout=remaining,
+                    suppress_origin=True,
+                ),
+                threading.Lock(),
+            )
+            self._connections[websocket_url] = entry
+            return entry
+
+    def _drop_connection(self, websocket_url: str) -> None:
+        with self._lock:
+            entry = self._connections.pop(websocket_url, None)
+        if entry is not None:
+            try:
+                entry[0].close()
+            except (OSError, AttributeError):
+                pass
+
+    def _evaluate(self, websocket_url: str, expression: str, deadline: float) -> dict:
+        connection, connection_lock = self._connection_for(websocket_url, deadline)
+        request_id = int(time.time_ns() % 1_000_000_000)
+        with connection_lock:
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("context_deadline_exceeded")
+                connection.settimeout(remaining)
+                connection.send(json.dumps({
+                    "id": request_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": expression,
+                        "returnByValue": True,
+                        "awaitPromise": True,
+                    },
+                }))
+                while time.monotonic() < deadline:
+                    connection.settimeout(max(0.001, deadline - time.monotonic()))
+                    packet = json.loads(connection.recv())
+                    if packet.get("id") != request_id:
+                        continue
+                    if packet.get("error"):
+                        raise RuntimeError("cdp_protocol_error")
+                    remote = packet.get("result", {}).get("result", {})
+                    if remote.get("subtype") == "error" or packet.get("result", {}).get("exceptionDetails"):
+                        raise RuntimeError("cdp_javascript_error")
+                    value = remote.get("value")
+                    if not isinstance(value, dict):
+                        raise RuntimeError("cdp_invalid_value")
+                    return value
+                raise TimeoutError("cdp_timeout")
+            except TimeoutError:
+                # 超时时页内 evaluate 仍在执行（如安装体轮询），迟到回包会被
+                # 下次查询的 id 匹配跳过，连接本身多半还健康，不作废。
+                raise
+            except Exception:
+                # 其余异常（页面重载/连接断开）后的连接状态不可信，作废重连。
+                self._drop_connection(websocket_url)
+                raise
+
+    # 查询函数 __pddBridgeQuery 安装后常驻页面：首次查询执行安装体（含就绪
+    # 轮询），之后每次查询跳过安装直接 fetch，一次 evaluate 即一次网络往返。
+    # 即使本侧 evaluate 超时，页内安装仍会继续完成，下一次查询直接命中。
+    _QUERY_TEMPLATE = """(async()=>{
+const parse=(value)=>{try{return JSON.parse(value||'{}')}catch(_){return {}}};
+const readMall=()=>{
+  const info=parse(localStorage.getItem('userinfo'));
+  const newer=parse(localStorage.getItem('new_userinfo'));
+  return String(info.mall_id||info.mallId||newer.mall_id||newer.mallId||'');
+};
+const expectedMall=__EXPECTED_MALL__;
+const buyerId=__BUYER_ID__;
+const pageMall=readMall();
+if(pageMall!==expectedMall)return {skip:true,mall_id:pageMall};
+if(!window.__pddBridgeQuery){
+  const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+  // 等面板就绪 (.main.__vue__.$axios 可用), 最多 16 次 * 200ms = 3.2s
+  let root=null;
+  for(let i=0;i<16;i++){
+    root=document.querySelector('.main')&&document.querySelector('.main').__vue__;
+    if(root&&root.$axios&&root.$axios.post)break;
+    await sleep(200);
+  }
+  if(!root||!root.$axios)return {ok:false,error:'panel_not_ready',mall_id:pageMall};
+  window.__pddBridgeQuery=async(uid)=>{
+    const fetchOrders=async()=>{
+      try{
+        const response=await root.$axios.post('/latitude/order/userAllOrder',{pageNo:1,pageSize:20,uid:uid});
+        const rows=Array.isArray(response&&response.orders)?response.orders:[];
+        const orders=rows.map(order=>{
+          const rawGoods=Array.isArray(order.orderGoodsList)?order.orderGoodsList:(order.orderGoodsList?[order.orderGoodsList]:[]);
+          const goods=rawGoods.slice(0,5).map(item=>({
+            goods_id:String(item.goodsId||item.goods_id||''),
+            goods_name:String(item.goodsName||item.goods_name||''),
+            goods_thumb_url:String(item.thumbUrl||item.goods_thumb_url||''),
+            goods_spec:String(item.spec||item.goods_spec||''),
+            goods_price:item.goodsPrice==null?item.goods_price:item.goodsPrice,
+            goods_number:item.goodsNumber==null?item.goods_number:item.goodsNumber
+          }));
+          return {
+            order_id:String(order.orderSn||order.order_sn||order.orderId||''),
+            mall_id:String(order.mallId||order.mall_id||''),
+            created_at:order.createdAt,
+            order_status:order.orderStatus,
+            pay_status:order.payStatus,
+            shipping_status:order.shippingStatus,
+            order_amount:order.orderAmount,
+            goods
+          };
+        });
+        return {ok:true,mall_id:pageMall,total:Number(response&&response.total||0),orders};
+      }catch(_){return {ok:false,error:'request_failed',mall_id:pageMall}};
+    };
+    // 面板刚就绪时首次查询可能是空响应(时序), 最多补查一次, 间隔 350ms
+    let last=await fetchOrders();
+    if(last.ok&&!last.orders.length&&!last.total)last=await fetchOrders();
+    return last;
+  };
+}
+return window.__pddBridgeQuery(buyerId);
+})()"""
 
     @staticmethod
     def _query_expression(mall_id: str, buyer_id: str) -> str:
-        expected = json.dumps(mall_id)
-        buyer = json.dumps(buyer_id)
-        return f"""(async()=>{{
-const expectedMall={expected};
-const buyerId={buyer};
-const parse=(value)=>{{try{{return JSON.parse(value||'{{}}')}}catch(_){{return {{}}}}}};
-const info=parse(localStorage.getItem('userinfo'));
-const newer=parse(localStorage.getItem('new_userinfo'));
-const pageMall=String(info.mall_id||info.mallId||newer.mall_id||newer.mallId||'');
-if(pageMall!==expectedMall)return {{skip:true,mall_id:pageMall}};
-const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
-// 等面板就绪 (.main.__vue__.$axios 可用), 最多 16 次 * 200ms = 3.2s
-let root=null;
-for(let i=0;i<16;i++){{
-  root=document.querySelector('.main')&&document.querySelector('.main').__vue__;
-  if(root&&root.$axios&&root.$axios.post)break;
-  await sleep(200);
-}}
-if(!root||!root.$axios)return {{ok:false,error:'panel_not_ready',mall_id:pageMall}};
-const fetchOrders=async()=>{{
-  try{{
-    const response=await root.$axios.post('/latitude/order/userAllOrder',{{pageNo:1,pageSize:20,uid:buyerId}});
-    const rows=Array.isArray(response&&response.orders)?response.orders:[];
-    const orders=rows.map(order=>{{
-      const rawGoods=Array.isArray(order.orderGoodsList)?order.orderGoodsList:(order.orderGoodsList?[order.orderGoodsList]:[]);
-      const goods=rawGoods.slice(0,5).map(item=>({{
-        goods_id:String(item.goodsId||item.goods_id||''),
-        goods_name:String(item.goodsName||item.goods_name||''),
-        goods_thumb_url:String(item.thumbUrl||item.goods_thumb_url||''),
-        goods_spec:String(item.spec||item.goods_spec||''),
-        goods_price:item.goodsPrice==null?item.goods_price:item.goodsPrice,
-        goods_number:item.goodsNumber==null?item.goods_number:item.goodsNumber
-      }}));
-      return {{
-        order_id:String(order.orderSn||order.order_sn||order.orderId||''),
-        mall_id:String(order.mallId||order.mall_id||''),
-        created_at:order.createdAt,
-        order_status:order.orderStatus,
-        pay_status:order.payStatus,
-        shipping_status:order.shippingStatus,
-        order_amount:order.orderAmount,
-        goods
-      }};
-    }});
-    return {{ok:true,mall_id:pageMall,total:Number(response&&response.total||0),orders}};
-  }}catch(_){{return {{ok:false,error:'request_failed',mall_id:pageMall}}}};
-}};
-// 面板刚就绪时首次查询可能是空响应(时序), 重试 3 次, 间隔 350ms
-let last=null;
-for(let i=0;i<3;i++){{
-  last=await fetchOrders();
-  if(last.ok && (last.orders&&last.orders.length||last.total>0))return last;
-  if(last.ok && !last.orders && last.total===0){{ await sleep(350); continue; }}
-  return last;
-}}
-return last;
-}})()"""
+        return (
+            PddOrderContextLookup._QUERY_TEMPLATE
+            .replace("__EXPECTED_MALL__", json.dumps(mall_id))
+            .replace("__BUYER_ID__", json.dumps(buyer_id))
+        )
 
     def lookup(self, message: dict) -> dict:
         """带会话级结果缓存：同一 (店铺, 买家) 在 TTL 内只真正查一次 CDP。"""
@@ -426,31 +470,40 @@ return last;
         targets: List[str] = []
         # 锁只保护目标探测/缓存：Runtime.evaluate 的网络往返必须能并行，
         # 否则加再多 worker 也只是一条串行队列（100+/分钟就压死）。
+        # 锁只保护目标探测/缓存：Runtime.evaluate 的网络往返必须能并行，
+        # 否则加再多 worker 也只是一条串行队列（100+/分钟就压死）。
         with self._lock:
             cached = self._target_cache.get(mall_id)
-            if cached and cached[0] > time.monotonic():
-                targets.append(cached[1])
-            if not targets:
-                targets.extend(self._right_panel_targets(deadline))
+            targets = [cached[1]] if cached and cached[0] > time.monotonic() else []
+            scanned = not targets
+        if not targets:
+            targets = self._right_panel_targets(deadline)
         if not targets:
             return _failure("pdd_cdp_unavailable")
 
         saw_matching_panel = False
-        for target in targets:
-            if time.monotonic() >= deadline:
-                return _failure("context_deadline_exceeded")
-            try:
-                response = self._evaluate(target, expression, deadline)
-            except Exception:
-                continue
-            if response.get("skip"):
-                continue
-            saw_matching_panel = True
-            if not response.get("ok"):
-                return _failure(str(response.get("error") or "request_failed"))
-            with self._lock:
-                self._target_cache[mall_id] = (time.monotonic() + 10.0, target)
-            return normalize_order_response(mall_id, response)
+        while targets:
+            for target in targets:
+                if time.monotonic() >= deadline:
+                    return _failure("context_deadline_exceeded")
+                try:
+                    response = self._evaluate(target, expression, deadline)
+                except Exception:
+                    continue
+                if response.get("skip"):
+                    continue
+                saw_matching_panel = True
+                if not response.get("ok"):
+                    return _failure(str(response.get("error") or "request_failed"))
+                # 目标缓存 60s：面板重载导致的失效由下方失败重扫兜底
+                with self._lock:
+                    self._target_cache[mall_id] = (time.monotonic() + 60.0, target)
+                return normalize_order_response(mall_id, response)
+            if saw_matching_panel or scanned:
+                break
+            # 缓存目标全部失败说明面板重载过（webSocketDebuggerUrl 已变），重扫一次
+            targets = self._right_panel_targets(deadline)
+            scanned = True
         with self._lock:
             self._target_cache.pop(mall_id, None)
         return _failure("lookup_failed" if saw_matching_panel else "mall_panel_not_found")

@@ -37,9 +37,6 @@ _READ_BUDGET_SECONDS = 0.5
 # pathological buffer (far above normal) pauses reading as a last resort.
 _PENDING_READ_LIMIT = 20000
 _PENDING_FLUSH_BATCH = 500
-# stop() 只等这么久让 watcher 线程自己做完最后一次排空。调用方通常是 Tk 主线程，
-# 等太久会冻界面，超时则保持事件在 _pending_events 里（游标没提交，重启会重放）。
-_STOP_FLUSH_TIMEOUT = 2.0
 
 
 class LogWatcher:
@@ -90,9 +87,6 @@ class LogWatcher:
         self._seller_history: List[dict] = []
         self._pending_events: Dict[str, dict] = {}
         self._pending_lock = threading.RLock()
-        # 保证同一时刻只有一个线程在投递事件。没有它时 stop() 与 watcher 线程会
-        # 各自算出同一批 ready、把同一条消息投递两次。
-        self._flush_lock = threading.Lock()
         self._product_context_by_message: Dict[Tuple[str, str, str], dict] = {}
         self._stats_lock = threading.Lock()
         self._stats: Dict[str, Dict[str, int]] = {}
@@ -108,18 +102,7 @@ class LogWatcher:
 
     def stop(self) -> None:
         self._stop.set()
-        # 最后一次排空交给 watcher 线程自己做（见 _run 末尾）：调用方是 GUI 主线程，
-        # 在这里跑 on_event 会把中心上报的 HTTP 调用搬进 Tk 线程冻界面；而且与
-        # watcher 线程并发时两边会各自投递同一批事件，造成重复上报。
-        thread = self._thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=_STOP_FLUSH_TIMEOUT)
-        self._thread = None
-        if thread is not None and thread.is_alive():
-            # 线程没能及时退出：不要把文件句柄从它脚下抽掉，交给进程退出回收。
-            # 未投递的事件仍在 _pending_events 里，游标未提交，重启会重放。
-            self.last_error = self.last_error or "watcher 停止超时，最后一次排空未完成"
-            return
+        self._flush_pending(force=True)
         for handle in list(self._handles.values()):
             try:
                 handle.close()
@@ -600,60 +583,42 @@ class LogWatcher:
 
     def _flush_pending(self, *, force: bool = False) -> None:
         now = time.monotonic()
-        first_error: Optional[BaseException] = None
-        # 先拿 _flush_lock 再快照 ready：反过来会让第二个线程算出一份一模一样的
-        # ready，等锁释放后再把同一批事件重投一遍。锁序固定为
-        # _flush_lock -> _pending_lock，没有反向获取。
-        with self._flush_lock:
-            with self._pending_lock:
-                ready = [
-                    (key, value)
-                    for key, value in self._pending_events.items()
-                    if force or float(value.get("due") or 0.0) <= now
-                ]
-                ready.sort(key=lambda item: float(item[1].get("first_seen") or 0.0))
-                if not force:
-                    ready = ready[:_PENDING_FLUSH_BATCH]
-            for _key, item in ready:
-                message = item["message"]
-                source = str(item.get("source") or "")
-                exact = str(item.get("exact") or "")
-                semantic = str(item.get("semantic") or "")
-                if self._is_history_duplicate(exact, semantic, now, message):
-                    self._bump(source, "duplicate_events")
-                    with self._pending_lock:
-                        self._pending_events.pop(_key, None)
-                    continue
-                try:
-                    self.on_event(message)
-                except Exception as exc:
-                    # 回调失败必须保留事件等待重试（不能丢消息），但也不能让它挡住
-                    # 后面已就绪的事件：旧实现直接抛出，失败项永远排在队头，后续事件
-                    # 被永久饿死、日志游标永不提交。这里继续处理其余事件，最后再把
-                    # 第一个异常抛回去，保持“重试且不记账”的既有语义。
-                    self._bump(source, "callback_errors")
-                    self.last_error = f"on_event {source}: {exc}"
-                    if first_error is None:
-                        first_error = exc
-                    continue
+        with self._pending_lock:
+            ready = [
+                (key, value)
+                for key, value in self._pending_events.items()
+                if force or float(value.get("due") or 0.0) <= now
+            ]
+            ready.sort(key=lambda item: float(item[1].get("first_seen") or 0.0))
+            if not force:
+                ready = ready[:_PENDING_FLUSH_BATCH]
+        for _key, item in ready:
+            message = item["message"]
+            source = str(item.get("source") or "")
+            exact = str(item.get("exact") or "")
+            semantic = str(item.get("semantic") or "")
+            if self._is_history_duplicate(exact, semantic, now, message):
+                self._bump(source, "duplicate_events")
                 with self._pending_lock:
                     self._pending_events.pop(_key, None)
-                self._remember(exact, now)
-                if semantic:
-                    self._seller_semantic_seen[semantic] = now
-                    self._seller_history.append({
-                        "scope": self._seller_scope(message),
-                        "content": self._normalized_content(message.get("content")),
-                        "at": now,
-                    })
-                self._bump(source, "emitted_events")
+                continue
+            self.on_event(message)
+            with self._pending_lock:
+                self._pending_events.pop(_key, None)
+            self._remember(exact, now)
+            if semantic:
+                self._seller_semantic_seen[semantic] = now
+                self._seller_history.append({
+                    "scope": self._seller_scope(message),
+                    "content": self._normalized_content(message.get("content")),
+                    "at": now,
+                })
+            self._bump(source, "emitted_events")
         cutoff = now - 10.0
         for key, seen_at in list(self._seller_semantic_seen.items()):
             if seen_at < cutoff:
                 self._seller_semantic_seen.pop(key, None)
         self._seller_history = [row for row in self._seller_history if float(row.get("at") or 0.0) >= cutoff]
-        if first_error is not None:
-            raise first_error
 
     def _bump(self, source: str, field: str, amount: int = 1) -> None:
         with self._stats_lock:
@@ -788,13 +753,3 @@ class LogWatcher:
             except Exception as exc:
                 self.last_error = f"watcher: {exc}"
             self._stop.wait(self.poll_interval)
-        # 退出前在自己的线程里最后排空一次并提交游标。stop() 不再从调用方线程投递，
-        # 否则同一事件会被两个线程各投递一次。
-        try:
-            self._flush_pending(force=True)
-        except Exception as exc:
-            self.last_error = f"final flush: {exc}"
-        try:
-            self._save_checkpoints()
-        except Exception as exc:
-            self.last_error = f"final checkpoint: {exc}"

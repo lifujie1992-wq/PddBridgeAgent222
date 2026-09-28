@@ -31,9 +31,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
 BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
-DEFAULT_BACKEND = "http://203.0.113.10:18765"
+DEFAULT_BACKEND = "http://47.107.138.228:18765"
 DEFAULT_PORT = 18767
-LOCAL_GATEWAY_VERSION = "0.10.1.0"
+LOCAL_GATEWAY_VERSION = "0.7.6.0"
 _SENSITIVE_PROXY_HEADERS = {
     "host",
     "content-length",
@@ -146,7 +146,6 @@ def load_seat_identity(config_path: str = "") -> dict[str, str]:
         candidates.extend(
             [
                 runtime_root / "bridge_config.json",
-                runtime_root / "bridge_config.taobao.json",
             ]
         )
     cfg: dict = {}
@@ -164,7 +163,8 @@ def load_seat_identity(config_path: str = "") -> dict[str, str]:
     if not cfg:
         return {
             "agent_token": "", "agent_id": "", "device_id": "",
-            "server_url": "", "platform": "pdd", "config_path": explicit,
+            "server_url": "", "websocket_enabled": False,
+            "platform": "pdd", "config_path": explicit,
         }
     token = str(cfg.get("agent_token") or "").strip()
     if token.lower().startswith(("change-me", "replace-me")) or token.lower() in {"example", "changeme"}:
@@ -174,6 +174,7 @@ def load_seat_identity(config_path: str = "") -> dict[str, str]:
         "agent_id": str(cfg.get("agent_id") or "").strip(),
         "device_id": str(cfg.get("device_id") or cfg.get("agent_id") or "").strip(),
         "server_url": str(cfg.get("server_url") or "").strip().rstrip("/"),
+        "websocket_enabled": bool(cfg.get("websocket_enabled", False)),
         "platform": str(cfg.get("platform") or "pdd").strip().lower(),
         "config_path": str(cfg.get("config_path") or ""),
     }
@@ -308,9 +309,6 @@ def _shop_id_from_account(account: str, platform: str = "") -> str:
         return f"mall_{mall}" if mall.isdigit() else ""
     if account.startswith(("mall_", "tb_")):
         return account
-    if account and platform == "taobao":
-        store = account.split(":", 1)[0].split("：", 1)[0].strip()
-        return f"tb_nick_{store}" if store else ""
     return ""
 
 
@@ -320,23 +318,8 @@ def _event_timestamp(value) -> float:
 
 
 def _is_pdd_system_event(value: dict) -> bool:
-    if not isinstance(value, dict):
-        return False
-    event = value.get("event") if isinstance(value.get("event"), dict) else value
-    template = str(event.get("template_name") or event.get("template") or "").strip().lower()
-    if template == "mall_robot_man_intervention_and_restart":
-        return True
-    try:
-        message_type = int(event.get("raw_type", event.get("message_type", event.get("type", -1))))
-    except (TypeError, ValueError):
-        message_type = -1
-    content = " ".join(str(event.get("content") or "").split())
-    if message_type == 31 and (
-        (bool(event.get("no_unreply_hint")) and bool(event.get("conv_silent")))
-        or ("还没有配置消费者问到的常见问题回答" in content and "立即配置" in content)
-    ):
-        return True
-    return "机器人已暂停接待" in content and "立即恢复接待" in content
+    from bridge.pdd_system_messages import is_pdd_system_event
+    return is_pdd_system_event(value)
 
 
 def _filter_replayed_callback_batches(messages: list[dict]) -> list[dict]:
@@ -391,6 +374,7 @@ class LocalSeatState:
         self.seat_accounts: dict[str, str] = {}
         self.shop_platforms: dict[str, str] = {}
         self.shop_ai_takeover: dict[str, bool] = {}
+        self.account_shops: dict[str, str] = {}
         self.auth_user: dict = {}
         self.remote_cache: dict[str, dict] = {}
         self.inflight: set[str] = set()
@@ -399,17 +383,15 @@ class LocalSeatState:
         self.agent_id = ""
         self.device_id = ""
         self.platform = "pdd"
+        self.websocket_enabled = False
         self.config_path = ""
         self.identity_provider: SeatIdentityProvider | None = None
         self.last_local_event_at = 0.0
         self.last_remote_sync_at = 0.0
         self.last_remote_error = ""
+        self.remote_errors: dict[str, str] = {}
         self.event_version = 0
         self.event_condition = threading.Condition(self.lock)
-        # 批量摄入时 publish(persist=False) 只置脏，由调用方在循环外 save() 一次。
-        # 旧实现每条事件都全量重写状态文件（N 条 = N 次 json.dumps + N 次原子替换，
-        # 全在全局锁内），100 条的批次就是 100 次全量序列化。
-        self._save_dirty = False
         self._load()
 
     @staticmethod
@@ -432,9 +414,40 @@ class LocalSeatState:
             and str(row.get("send_policy") or "").strip().lower() == "shop"
         )
 
-    @staticmethod
-    def _apply_ai_takeover_state(row: dict, shop_policies: dict[str, bool]) -> dict:
+    def _canonical_row(self, row: dict) -> dict:
         result = dict(row)
+        account = str(result.get("account") or "").strip()
+        shop_id = self.account_shops.get(account) or str(result.get("shop_id") or _shop_id_from_account(account, self.platform))
+        result["shop_id"] = shop_id
+        if self.shop_names.get(shop_id):
+            result["shop_name"] = self.shop_names[shop_id]
+        return result
+
+    def _visible_shop_ids(self) -> list[str]:
+        aliases = {
+            _shop_id_from_account(account, self.platform): shop
+            for account, shop in self.account_shops.items()
+        }
+        return sorted({aliases.get(shop, shop) for shop in self.active_shop_ids | self.observed_shop_ids})
+
+    def _logical_sessions(self, rows: list[dict]) -> list[dict]:
+        # Collapse only accounts explicitly joined by the center. Keep the
+        # chosen row's original account intact for detail and send routing.
+        grouped: dict[tuple[str, str], dict] = {}
+        for original in sorted(rows, key=lambda r: float(r.get("last_ts") or 0), reverse=True):
+            row = self._canonical_row(original)
+            identity = self.account_shops.get(str(row.get("account") or "")) or str(row.get("account") or "")
+            key = (identity, str(row.get("buyer_id") or ""))
+            current = grouped.get(key)
+            if current is None:
+                grouped[key] = row
+            elif row.get("handoff") and not current.get("handoff"):
+                # Never hide a handoff behind another account's AI preview.
+                grouped[key] = row
+        return list(grouped.values())
+
+    def _apply_ai_takeover_state(self, row: dict, shop_policies: dict[str, bool]) -> dict:
+        result = self._canonical_row(row)
         shop_id = str(result.get("shop_id") or _shop_id_from_account(result.get("account") or "", self.platform))
         if shop_id in shop_policies:
             shop_enabled = bool(shop_policies[shop_id])
@@ -461,6 +474,12 @@ class LocalSeatState:
             return result
 
         state = str(result.get("ai_takeover_state") or "").strip().lower()
+        if state == "shadow":
+            # A shadow value cached before the authoritative shop policy was
+            # enabled is not an explicit conversation pause.
+            result["ai_takeover_enabled"] = True
+            result["ai_takeover_state"] = "active"
+            return result
         if state:
             result["ai_takeover_enabled"] = bool(
                 result.get("ai_takeover_enabled", state == "active")
@@ -548,6 +567,29 @@ class LocalSeatState:
             sequence = 0
         return precise_timestamp, timestamp, sequence
 
+    def _reply_wait_state(self, messages: list[dict]) -> dict:
+        waiting_since = 0.0
+        def order(message):
+            msg_id = str(message.get("msg_id") or "")
+            return self._message_sort_key(message)[:2] + (int(msg_id) if msg_id.isdigit() else 0,)
+        for message in sorted((m for m in messages if isinstance(m, dict)), key=order):
+            if _is_pdd_system_event(message):
+                continue
+            role = str(message.get("role") or "")
+            if role == "user":
+                waiting_since = self._message_sort_key(message)[0]
+                continue
+            delivery = str(message.get("delivery_status") or "").lower()
+            source = str(message.get("source") or "").lower()
+            platform_echo = role == "mall_cs" and (
+                "bridge" in source or source.startswith("pdd_")
+            ) and delivery not in {"failed", "indeterminate", "accepted", "simulated", "dry_run"}
+            if role != "assistant_simulated" and (
+                platform_echo or delivery in {"confirmed", "sent", "delivered"}
+            ):
+                waiting_since = 0.0
+        return {"waiting_for_reply": bool(waiting_since), "waiting_since": waiting_since}
+
     def _repair_session_locked(self, session: dict) -> bool:
         original = session.get("messages") if isinstance(session.get("messages"), list) else []
         messages = [message for message in original if isinstance(message, dict)]
@@ -565,6 +607,7 @@ class LocalSeatState:
             "last_role": str(last.get("role") or ""),
             "last_sent_by": str(last.get("sent_by") or ""),
             "last_ts": self._message_sort_key(last)[0],
+            **self._reply_wait_state(messages),
         }
         for key, value in summary.items():
             if session.get(key) != value:
@@ -680,6 +723,7 @@ class LocalSeatState:
         agent_id: str,
         device_id: str = "",
         platform: str = "pdd",
+        websocket_enabled: bool = False,
         config_path: str = "",
         identity_provider: SeatIdentityProvider | None = None,
     ) -> None:
@@ -688,6 +732,7 @@ class LocalSeatState:
         self.agent_id = str(agent_id or "").strip()
         self.device_id = str(device_id or agent_id or "").strip()
         self.platform = str(platform or "pdd").strip().lower()
+        self.websocket_enabled = bool(websocket_enabled)
         self.config_path = str(config_path or "").strip()
         if identity_provider is not None:
             self.identity_provider = identity_provider
@@ -710,6 +755,7 @@ class LocalSeatState:
             agent_id=identity.get("agent_id") or "",
             device_id=identity.get("device_id") or "",
             platform=identity.get("platform") or "pdd",
+            websocket_enabled=bool(identity.get("websocket_enabled", False)),
             config_path=identity.get("config_path") or "",
         )
         return identity
@@ -741,6 +787,9 @@ class LocalSeatState:
         if isinstance(names, dict):
             self.shop_names = {str(key): str(value) for key, value in names.items()}
         accounts = data.get("shop_accounts")
+        mapping = data.get("account_shops")
+        if isinstance(mapping, dict):
+            self.account_shops = {str(k): str(v) for k, v in mapping.items()}
         if isinstance(accounts, dict):
             self.shop_accounts = {str(key): str(value) for key, value in accounts.items()}
         seat_accounts = data.get("seat_accounts")
@@ -795,15 +844,6 @@ class LocalSeatState:
             self._repair_session_locked(session)
         return changed
 
-    def save(self) -> None:
-        """把内存状态落盘（仍同步、仍在锁内）。
-
-        批量摄入时由调用方在循环外调一次，替代"每条事件各存一次"。单独调用
-        publish() 的路径行为不变，响应依然在落盘之后才发出。
-        """
-        with self.lock:
-            self._save_locked()
-
     def _save_locked(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -819,6 +859,7 @@ class LocalSeatState:
                         "seat_accounts": self.seat_accounts,
                         "shop_platforms": self.shop_platforms,
                         "shop_ai_takeover": self.shop_ai_takeover,
+                        "account_shops": self.account_shops,
                         "auth_user": self.auth_user,
                         "sessions": self.sessions,
                     },
@@ -828,7 +869,6 @@ class LocalSeatState:
                 encoding="utf-8",
             )
             temporary.replace(self.path)
-            self._save_dirty = False
         except OSError:
             pass
 
@@ -862,7 +902,7 @@ class LocalSeatState:
         temporary.replace(path)
         return current
 
-    def publish(self, raw: dict, *, persist: bool = True) -> dict:
+    def publish(self, raw: dict) -> dict:
         event = raw.get("event") if isinstance(raw.get("event"), dict) else raw
         if str(event.get("type") or "").strip().lower() == "shop_metadata":
             platform = str(event.get("platform") or "pdd").strip().lower() or "pdd"
@@ -921,7 +961,6 @@ class LocalSeatState:
                     value for value in sorted(self.active_shop_ids | self.observed_shop_ids)
                     if self.shop_platforms.get(value, "").lower() == platform
                     or (platform == "pdd" and value.startswith("mall_"))
-                    or (platform == "taobao" and value.startswith("tb_"))
                 ]
                 if len(candidates) == 1:
                     shop_id = candidates[0]
@@ -940,14 +979,17 @@ class LocalSeatState:
         timestamp = _event_timestamp(event.get("ts"))
         msg_id = str(
             event.get("msg_id")
+            or event.get("platform_message_id")
             or event.get("event_id")
             or event.get("idempotency_key")
             or f"local-{account}-{buyer_id}-{timestamp}-{content[:32]}"
         )
         role = str(event.get("role") or "user").strip() or "user"
-        explicit_nickname = str(event.get("buyer_nick") or event.get("nickname") or "").strip()
+        explicit_nickname = str(event.get("buyer_nick") or event.get("nickname") or "").strip() if role == "user" else ""
         message = {
             "msg_id": msg_id,
+            "event_id": str(event.get("event_id") or event.get("idempotency_key") or ""),
+            "idempotency_key": str(event.get("idempotency_key") or event.get("event_id") or ""),
             "buyer_id": buyer_id,
             "role": role,
             "content": content,
@@ -1070,10 +1112,7 @@ class LocalSeatState:
                         self.shop_accounts[shop_id] = account
                 metadata_changed = metadata_changed or self.shop_platforms.get(shop_id) != platform
                 self.shop_platforms[shop_id] = platform
-            if persist:
-                self._save_locked()
-            else:
-                self._save_dirty = True
+            self._save_locked()
             accepted = not duplicate or metadata_changed
             if accepted:
                 self.event_version += 1
@@ -1108,6 +1147,11 @@ class LocalSeatState:
             "platform": self.platform,
             "agent_id": self.agent_id,
             "device_id": self.device_id,
+            "websocket": {
+                "enabled": bool(self.websocket_enabled),
+                "connected": bool(self.websocket_enabled),
+                "transport": "websocket" if self.websocket_enabled else "http",
+            },
             "agent_token_set": bool(self.agent_token),
             "config_path": self.config_path,
             "mode": "local_first",
@@ -1234,8 +1278,13 @@ class LocalSeatState:
             visible_local_rows = self._clone(self._visible_sessions_locked())
             local_rows = list(visible_local_rows)
             shop_policies = dict(self.shop_ai_takeover)
-            active_shop_ids = sorted(self.active_shop_ids | self.observed_shop_ids)
+            active_shop_ids = self._visible_shop_ids()
             detail_summaries: dict[str, dict] = {}
+            wait_messages = {
+                self._key(row.get("account"), row.get("buyer_id")): list(
+                    self.sessions.get(self._key(row.get("account"), row.get("buyer_id")), {}).get("messages") or []
+                ) for row in local_rows
+            }
             for cached_path, payload in self.remote_cache.items():
                 if not cached_path.startswith("/api/session/") or not isinstance(payload, dict):
                     continue
@@ -1249,6 +1298,9 @@ class LocalSeatState:
                     if isinstance(message, dict) and not _is_pdd_system_event(message)
                 ]
                 detail_messages = _filter_replayed_callback_batches(detail_messages)
+                detail_key = self._key(detail_account, detail_buyer)
+                if detail_key in wait_messages:
+                    wait_messages[detail_key].extend(detail_messages)
                 if not detail_account or not detail_buyer or not detail_messages:
                     continue
                 latest = max(detail_messages, key=self._message_sort_key)
@@ -1273,7 +1325,7 @@ class LocalSeatState:
         requested_shop = str((query.get("shop_id") or [""])[0]).strip()
         scope = str((query.get("scope") or ["active"])[0]).strip().lower()
         if requested_shop:
-            local_rows = [row for row in local_rows if row.get("shop_id") == requested_shop]
+            local_rows = [row for row in local_rows if self._canonical_row(row).get("shop_id") == requested_shop]
         if search:
             local_rows = [
                 row for row in local_rows
@@ -1359,6 +1411,12 @@ class LocalSeatState:
             for row in merged.values()
             if not self._is_misidentified_pdd_staff_session_locked(row)
         ]
+        for row in rows:
+            row.update(self._reply_wait_state(wait_messages.get(
+                self._key(row.get("account"), row.get("buyer_id")), [])))
+        rows = self._logical_sessions(rows)
+        if requested_shop:
+            rows = [row for row in rows if row.get("shop_id") == requested_shop]
         all_rows = list(rows)
         if scope == "unread":
             rows = [row for row in rows if int(row.get("unread") or 0) > 0]
@@ -1367,7 +1425,7 @@ class LocalSeatState:
         for row in rows:
             if row.get("last_content") is not None:
                 row["display_last_content"] = row["last_content"]
-        rows.sort(key=lambda row: float(row.get("last_ts") or 0), reverse=True)
+        rows.sort(key=lambda row: (0 if row.get("handoff") else 1, -float(row.get("last_ts") or 0)))
         try:
             limit = max(1, min(int((query.get("limit") or [50])[0]), 100))
             page = max(1, int((query.get("page") or [1])[0]))
@@ -1448,7 +1506,7 @@ class LocalSeatState:
             if not only_handoff or bool(row.get("handoff"))
         ]
         rows.sort(key=lambda row: (0 if row.get("handoff") else 1, -float(row.get("last_ts") or 0)))
-        rows = rows[:limit]
+        rows = self._logical_sessions(rows)[:limit]
         return {
             **remote,
             "ok": True,
@@ -1470,7 +1528,11 @@ class LocalSeatState:
                 or ""
             ).strip()
             seat_account = str(self.seat_accounts.get(requested_shop) or "").strip()
-            if not seat_account or account != seat_account:
+            local_accounts = set(self.seat_accounts.values())
+            if account not in local_accounts or (
+                account != seat_account
+                and self.account_shops.get(account) != requested_shop
+            ):
                 return None
             names_changed = self._learn_remote_shop_names_locked(remote)
             if names_changed:
@@ -1530,8 +1592,12 @@ class LocalSeatState:
     def merged_status(self, path: str = "/api/status") -> dict:
         with self.lock:
             remote = self._clone(self.remote_cache.get(path) or {})
-            active = sorted(self.active_shop_ids | self.observed_shop_ids)
-            local_count = len(self._visible_sessions_locked())
+            errors = dict(self.remote_errors)
+            reply_errors = [error for route, error in errors.items()
+                            if route.startswith(("/api/session/", "/api/sessions"))]
+            sync_error = (reply_errors or list(errors.values()) or [""])[-1]
+            active = self._visible_shop_ids()
+            local_count = len(self._logical_sessions(self._visible_sessions_locked()))
             shop_name_map = dict(self.shop_names)
         remote_config = remote.get("config") if isinstance(remote.get("config"), dict) else {}
         configured_shop_names = remote_config.get("shop_name_map")
@@ -1554,11 +1620,17 @@ class LocalSeatState:
             "seat_active_shop_ids": active,
             "local_last_event_at": self.last_local_event_at,
             "local_last_remote_sync_at": self.last_remote_sync_at,
-            "local_remote_error": self.last_remote_error,
+            "local_remote_error": sync_error,
+            "local_sync_errors": errors,
             "gateway_version": LOCAL_GATEWAY_VERSION,
             "platform": self.platform,
             "agent_id": self.agent_id,
             "device_id": self.device_id,
+            "websocket": {
+                "enabled": bool(self.websocket_enabled),
+                "connected": bool(self.websocket_enabled),
+                "transport": "websocket" if self.websocket_enabled else "http",
+            },
         }
 
     def runtime_config(self) -> dict:
@@ -1583,7 +1655,7 @@ class LocalSeatState:
     def auth_me(self) -> dict:
         with self.lock:
             user = self._clone(self.auth_user)
-            shop_ids = sorted(self.active_shop_ids | self.observed_shop_ids)
+            shop_ids = self._visible_shop_ids()
         if not user:
             user = {
                 "username": f"seat:{self.agent_id}",
@@ -1673,7 +1745,8 @@ class LocalSeatState:
                     changed = previous != payload
                     self.remote_cache[path] = payload
                     self.last_remote_sync_at = time.time()
-                    self.last_remote_error = ""
+                    self.remote_errors.pop(path, None)
+                    self.last_remote_error = next(reversed(self.remote_errors.values()), "")
                     names_changed = self._learn_remote_shop_names_locked(payload)
                     if path == "/api/seat/v1/bootstrap":
                         self.active_shop_ids = {
@@ -1682,6 +1755,7 @@ class LocalSeatState:
                             if str(value or "").strip()
                         }
                         shop_ai_takeover: dict[str, bool] = {}
+                        account_shops: dict[str, str] = {}
                         for row in (payload.get("shops") or []):
                             if not isinstance(row, dict):
                                 continue
@@ -1690,6 +1764,11 @@ class LocalSeatState:
                                 continue
                             accounts = row.get("accounts") if isinstance(row.get("accounts"), list) else []
                             account = str(row.get("account") or (accounts[0] if accounts else "")).strip()
+                            if shop_id in self.active_shop_ids:
+                                for alias in [account, *accounts]:
+                                    alias = str(alias or "").strip()
+                                    if alias:
+                                        account_shops[alias] = shop_id
                             # A shop can have several CS accounts. Keep the
                             # account discovered locally for this seat.
                             if account and not self.shop_accounts.get(shop_id):
@@ -1699,6 +1778,7 @@ class LocalSeatState:
                                 self.shop_platforms[shop_id] = platform
                             shop_ai_takeover[shop_id] = self._bootstrap_shop_ai_enabled(row)
                         self.shop_ai_takeover = shop_ai_takeover
+                        self.account_shops = account_shops
                         if isinstance(payload.get("user"), dict):
                             self.auth_user = dict(payload["user"])
                         self._save_locked()
@@ -1712,8 +1792,18 @@ class LocalSeatState:
                         self.event_version += 1
                         self.event_condition.notify_all()
             except Exception as exc:
+                detail = str(exc)
+                if isinstance(exc, urlerror.HTTPError):
+                    try:
+                        error_payload = json.loads(exc.read().decode("utf-8", "replace"))
+                        message = error_payload.get("error_user") or error_payload.get("error")
+                        if message:
+                            detail = f"HTTP {exc.code}: {message}"
+                    except Exception:
+                        pass
                 with self.lock:
-                    self.last_remote_error = str(exc)[:300]
+                    self.remote_errors[path] = detail[:300]
+                    self.last_remote_error = detail[:300]
             finally:
                 with self.lock:
                     self.inflight.discard(key)
@@ -1922,6 +2012,7 @@ class FrontHandler(BaseHTTPRequestHandler):
             self._seat_stream()
             return True
         if path == "/api/status":
+            self.local_state.schedule_refresh(self.path)
             self._send_json(self.local_state.merged_status(self.path))
             return True
         if path == "/api/sessions":
@@ -2046,10 +2137,7 @@ class FrontHandler(BaseHTTPRequestHandler):
                 if not isinstance(event, dict):
                     continue
                 try:
-                    # 循环内只改内存、不落盘；下面循环外统一 save() 一次。
-                    # 旧实现每条事件一次全量序列化+原子替换（都持全局锁），
-                    # 100 条批次要 100 次，直接吃掉客户端 5s 的批次超时预算。
-                    result = self.local_state.publish(event, persist=False)
+                    result = self.local_state.publish(event)
                     accepted += int(bool(result.get("accepted")))
                     visible += int(bool(result.get("visible")))
                     acknowledgement = {
@@ -2065,9 +2153,6 @@ class FrontHandler(BaseHTTPRequestHandler):
                     event_acks.append(acknowledgement)
                 except ValueError as exc:
                     errors.append(str(exc))
-            # 整个批次落盘一次。仍然在本请求内同步完成，所以桥的本地优先门控
-            # 语义不变（响应依然代表"已持久化"）。
-            self.local_state.save()
             self._send_json({
                 "ok": not errors,
                 "accepted": accepted,
@@ -2224,7 +2309,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Staff frontend (static + API proxy)")
     parser.add_argument("--host", default=host_default)
     parser.add_argument("--port", type=int, default=fe_default)
-    parser.add_argument("--backend", default="", help="Backend origin, e.g. http://203.0.113.10:18765")
+    parser.add_argument("--backend", default="", help="Backend origin, e.g. http://47.107.138.228:18765")
     parser.add_argument("--web-dir", default=str(WEB))
     parser.add_argument("--bridge-config", default="", help="Local bridge_config.json used to bind this seat")
     parser.add_argument("--ui-role", choices=("brain", "seat"), default="")
@@ -2281,6 +2366,7 @@ def main() -> int:
         agent_id=FrontHandler.seat_agent_id,
         device_id=FrontHandler.seat_device_id,
         platform=identity.get("platform") or "pdd",
+        websocket_enabled=bool(identity.get("websocket_enabled", False)),
         config_path=str(exact_config_path),
         identity_provider=identity_provider,
     )

@@ -40,13 +40,27 @@ def _normalize_http_url(value: str, label: str, *, loopback: bool = False) -> st
     return url
 
 
+def _normalize_ws_url(value: str, label: str) -> str:
+    url = str(value or "").strip().rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        raise ValueError(f"{label}必须是完整的 ws:// 或 wss:// 地址")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{label}端口无效") from exc
+    if parsed.username or parsed.password:
+        raise ValueError(f"{label}不应包含用户名或密码")
+    return url
+
+
 class ConfigDialog:
     def __init__(self, app: "BridgeGuiApp") -> None:
         self.app = app
         self.window = tk.Toplevel(app.root)
         self.window.title("编辑桥接配置")
-        self.window.geometry("650x570")
-        self.window.minsize(600, 530)
+        self.window.geometry(f"700x{min(680, max(400, self.window.winfo_screenheight() - 120))}")
+        self.window.minsize(560, 400)
         self.window.configure(bg="#f4f6f8")
         self.window.transient(app.root)
         self.window.grab_set()
@@ -54,6 +68,11 @@ class ConfigDialog:
         cfg = dict(app.cfg)
         self.vars = {
             "server_url": tk.StringVar(value=str(cfg.get("server_url") or "")),
+            "websocket_url": tk.StringVar(value=str(
+                cfg.get("websocket_url") or "ws://47.107.138.228:18765/api/bridge/v1/ws"
+            )),
+            "websocket_enabled": tk.BooleanVar(value=bool(cfg.get("websocket_enabled", False))),
+            "websocket_max_inflight": tk.StringVar(value=str(cfg.get("websocket_max_inflight") or 64)),
             "agent_token": tk.StringVar(value=str(cfg.get("agent_token") or "")),
             "agent_name": tk.StringVar(value=str(cfg.get("agent_name") or "")),
             "tanyu_log_dir": tk.StringVar(value=str(cfg.get("tanyu_log_dir") or "")),
@@ -75,8 +94,10 @@ class ConfigDialog:
         self.window.after(0, self._focus)
 
     def _build(self, cfg: dict) -> None:
+        self.window.grid_columnconfigure(0, weight=1)
+        self.window.grid_rowconfigure(1, weight=1)
         header = tk.Frame(self.window, bg=self.app.platform.header_color)
-        header.pack(fill=tk.X)
+        header.grid(row=0, column=0, sticky="ew")
         tk.Label(
             header,
             text="桥接配置",
@@ -92,8 +113,18 @@ class ConfigDialog:
             bg=self.app.platform.header_color,
         ).pack(anchor="w", padx=18, pady=(0, 12))
 
-        form = tk.Frame(self.window, bg="white", highlightbackground="#d0d7de", highlightthickness=1)
-        form.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=16, pady=14)
+        viewport = tk.Frame(self.window, bg="white", highlightbackground="#d0d7de", highlightthickness=1)
+        viewport.grid(row=1, column=0, sticky="nsew", padx=16, pady=14)
+        scrollbar = ttk.Scrollbar(viewport, orient=tk.VERTICAL)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.form_canvas = tk.Canvas(viewport, bg="white", highlightthickness=0, yscrollcommand=scrollbar.set)
+        self.form_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.configure(command=self.form_canvas.yview)
+        form = tk.Frame(self.form_canvas, bg="white")
+        form_id = self.form_canvas.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda event: self.form_canvas.configure(scrollregion=self.form_canvas.bbox("all")))
+        self.form_canvas.bind("<Configure>", lambda event: self.form_canvas.itemconfigure(form_id, width=event.width))
+        self.window.bind("<MouseWheel>", self._scroll_form, add="+")
         form.grid_columnconfigure(1, weight=1)
 
         self._entry_row(form, 0, "中心服务地址", "server_url")
@@ -101,6 +132,7 @@ class ConfigDialog:
         self._entry_row(form, 2, "工位名称", "agent_name")
         self._entry_row(form, 3, "探域日志目录", "tanyu_log_dir", browse=True)
         self._entry_row(form, 4, "本地工作台地址", "local_workbench_url")
+        self._entry_row(form, 5, "WebSocket 地址", "websocket_url")
 
         tk.Label(
             form,
@@ -109,7 +141,7 @@ class ConfigDialog:
             fg="#57606a",
             bg="white",
             anchor="e",
-        ).grid(row=5, column=0, sticky="e", padx=(14, 10), pady=7)
+        ).grid(row=6, column=0, sticky="e", padx=(14, 10), pady=7)
         agent_id = tk.Entry(
             form,
             font=("Microsoft YaHei UI", 9),
@@ -120,10 +152,22 @@ class ConfigDialog:
         )
         agent_id.insert(0, str(cfg.get("agent_id") or ""))
         agent_id.configure(state=tk.DISABLED)
-        agent_id.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=7, ipady=5)
+        agent_id.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(0, 14), pady=7, ipady=5)
 
         options = tk.Frame(form, bg="white")
-        options.grid(row=6, column=0, columnspan=3, sticky="ew", padx=16, pady=(10, 8))
+        options.grid(row=7, column=0, columnspan=3, sticky="ew", padx=16, pady=(10, 8))
+        tk.Checkbutton(
+            options,
+            text="启用 WebSocket 长连接（服务端支持后再开启）",
+            variable=self.vars["websocket_enabled"],
+            font=("Microsoft YaHei UI", 9, "bold"),
+            bg="white",
+            activebackground="white",
+        ).pack(anchor="w")
+        ws_limit = tk.Frame(options, bg="white")
+        ws_limit.pack(anchor="w", pady=(4, 6))
+        tk.Label(ws_limit, text="WebSocket 未确认上限：", font=("Microsoft YaHei UI", 9), bg="white").pack(side="left")
+        tk.Spinbox(ws_limit, from_=1, to=512, textvariable=self.vars["websocket_max_inflight"], width=7).pack(side="left")
         ds_row = tk.Frame(options, bg="white")
         ds_row.pack(anchor="w", pady=(0, 6))
         tk.Label(
@@ -174,7 +218,7 @@ class ConfigDialog:
         ).pack(anchor="w", pady=(4, 0))
 
         actions = tk.Frame(self.window, bg="#f4f6f8")
-        actions.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 14))
+        actions.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
         tk.Button(
             actions,
             text="高级：打开 JSON",
@@ -209,6 +253,12 @@ class ConfigDialog:
             pady=7,
             cursor="hand2",
         ).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _scroll_form(self, event) -> None:
+        if self.form_canvas.yview() == (0.0, 1.0) or not event.delta:
+            return
+        units = -int(event.delta / 120) or (-1 if event.delta > 0 else 1)
+        self.form_canvas.yview_scroll(units, "units")
 
     def _entry_row(
         self,
@@ -274,6 +324,7 @@ class ConfigDialog:
     def save(self) -> None:
         try:
             server_url = _normalize_http_url(self.vars["server_url"].get(), "中心服务地址")
+            websocket_url = _normalize_ws_url(self.vars["websocket_url"].get(), "WebSocket 地址")
             workbench_url = _normalize_http_url(
                 self.vars["local_workbench_url"].get(),
                 "本地工作台地址",
@@ -290,11 +341,19 @@ class ConfigDialog:
             log_dir = self.vars["tanyu_log_dir"].get().strip()
             if not log_dir:
                 raise ValueError("探域日志目录不能为空")
+            try:
+                websocket_max_inflight = max(1, min(512, int(self.vars["websocket_max_inflight"].get())))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("WebSocket 未确认上限必须是 1 到 512 的整数") from exc
 
             updated = dict(self.app.cfg)
             updated.update(
                 {
                     "server_url": server_url,
+                    "websocket_url": websocket_url,
+                    "websocket_path": websocket_url.split("/api/bridge/v1/ws", 1)[-1] if "/api/bridge/v1/ws" in websocket_url else "/api/bridge/v1/ws",
+                    "websocket_enabled": self.vars["websocket_enabled"].get(),
+                    "websocket_max_inflight": websocket_max_inflight,
                     "agent_token": token,
                     "agent_name": agent_name,
                     "tanyu_log_dir": log_dir,
@@ -437,24 +496,15 @@ class BridgeGuiApp:
         ).pack(anchor="w", padx=12, pady=(10, 4))
 
         self.row_center = self._status_row(card, "中心大脑")
-        self.row_dll = self._status_row(
-            card, "通道就绪" if self.platform.name == "taobao" else "工作台发送"
-        )
+        self.row_dll = self._status_row(card, "工作台发送")
         self.row_watch = self._status_row(card, "消息监听")
         self.row_seat = self._status_row(card, "本机工位")
         tk.Frame(card, height=8, bg="white").pack()
 
-        if self.platform.name == "taobao":
-            tip_text = (
-                "使用前请：① 打开千牛接待台并登录  ② 建议开「无障碍模式」+ 多账号接待\n"
-                "发送走 openbot 同款：CDP 写入输入框 + 点「发送」。窗口可最小化。\n"
-                "配置 dry_run=false 才会真发；PddBridgeAgent 不会处理淘宝消息。"
-            )
-        else:
-            tip_text = (
-                "使用前请先打开：① 探域智能体  ② 拼多多商家工作台\n"
-                "窗口可最小化；直接关闭会断开桥接。"
-            )
+        tip_text = (
+            "使用前请先打开：① 探域智能体  ② 拼多多商家工作台\n"
+            "窗口可最小化；直接关闭会断开桥接。"
+        )
         tip = tk.Label(
             body,
             text=tip_text,
@@ -766,8 +816,8 @@ class BridgeGuiApp:
     def _refresh_view(self) -> None:
         ch = self._channel_snapshot()
         dll_ok = bool(ch.get("dll_ready"))
-        receive_ok = bool(ch.get("receive_ready", self.platform.name != "taobao"))
-        channel_ok = bool(dll_ok and (self.platform.name != "taobao" or receive_ok))
+        receive_ok = bool(ch.get("receive_ready", True))
+        channel_ok = bool(dll_ok and receive_ok)
         log_dir_ok = Path(str(self.cfg.get("tanyu_log_dir") or "")).is_dir()
         token_ok = bool(self.cfg.get("agent_token")) and not str(self.cfg.get("agent_token")).startswith("change-me")
 
@@ -819,19 +869,9 @@ class BridgeGuiApp:
                 self._set_row(self.row_watch, "warn", "监听未就绪")
 
         if channel_ok:
-            if self.platform.name == "taobao":
-                self._set_row(self.row_dll, "ok", ch.get("hint") or "千牛通道就绪")
-            else:
-                self._set_row(self.row_dll, "ok", f"正常，端口 {ch.get('dll_port')}")
+            self._set_row(self.row_dll, "ok", ch.get("hint") or f"正常，端口 {ch.get('dll_port')}")
         else:
-            if self.platform.name == "taobao":
-                self._set_row(
-                    self.row_dll,
-                    "warn",
-                    ch.get("hint") or "未就绪 — 请从探域启动千牛并确认注入",
-                )
-            else:
-                self._set_row(self.row_dll, "warn", "未就绪 — 请打开探域 + 拼多多工作台")
+            self._set_row(self.row_dll, "warn", "未就绪 — 请打开探域 + 拼多多工作台")
 
         seat = f"{self.cfg.get('agent_name') or '未命名'}  ·  {self.cfg.get('agent_id') or '-'}"
         if not token_ok:
@@ -859,31 +899,12 @@ class BridgeGuiApp:
                 self._set_banner("ok", "● 运行中 · 一切正常", "可最小化本窗口；关闭窗口会断开桥接")
                 self.status_bar.set("状态：运行中（中心✓ 发送✓ 监听✓）")
             elif center_ok and watching and not channel_ok:
-                if self.platform.name == "taobao":
-                    if dll_ok and not receive_ok:
-                        self._set_banner(
-                            "warn",
-                            "● 运行中 · 收消息未就绪",
-                            ch.get("hint")
-                            or "千牛发送通道可用，但聊天页尚未连接，店铺和消息暂时不会上报",
-                        )
-                    else:
-                        self._set_banner(
-                            "warn",
-                            "● 运行中 · 不能发送",
-                            ch.get("hint")
-                            or "已连中心并在听消息，但千牛发送通道未就绪。请打开「千牛接待台」并登录",
-                        )
-                else:
-                    self._set_banner(
-                        "warn",
-                        "● 运行中 · 不能发送",
-                        "已连中心并在听消息，但工作台发送口未就绪。请打开探域 + 拼多多工作台",
-                    )
-                if self.platform.name == "taobao" and dll_ok and not receive_ok:
-                    self.status_bar.set("状态：运行中（中心✓ 发送✓ 接收✗）")
-                else:
-                    self.status_bar.set("状态：运行中（中心✓ 发送✗）")
+                self._set_banner(
+                    "warn",
+                    "● 运行中 · 不能发送",
+                    "已连中心并在听消息，但工作台发送口未就绪。请打开探域 + 拼多多工作台",
+                )
+                self.status_bar.set("状态：运行中（中心✓ 发送✗）")
             elif not center_ok:
                 self._set_banner(
                     "warn",
@@ -996,11 +1017,7 @@ class BridgeGuiApp:
                 "stopping": "正在停止",
             }.get(self._phase, self._phase)
             channel_line = (
-                (ch.get("hint") or ("通道就绪" if ch.get("dll_ready") else "通道未就绪"))
-                if self.platform.name == "taobao"
-                else (
-                    f"工作台发送：{'正常 端口 ' + str(ch.get('dll_port')) if ch.get('dll_ready') else '未就绪'}"
-                )
+                f"工作台发送：{'正常 端口 ' + str(ch.get('dll_port')) if ch.get('dll_ready') else '未就绪'}"
             )
             msg = (
                 f"【总状态】{phase_cn}\n"
@@ -1198,6 +1215,4 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg.startswith("--platform="):
             plat = arg.split("=", 1)[1]
-        elif arg in {"taobao", "pdd", "qianniu"}:
-            plat = "taobao" if arg == "qianniu" else arg
     raise SystemExit(main(plat))

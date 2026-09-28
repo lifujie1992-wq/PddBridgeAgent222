@@ -11,103 +11,27 @@ import threading
 import time
 import urllib.request
 import traceback
-from collections import OrderedDict, deque
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from . import __build_hash__, __version__
 from .client import BridgeClient, BridgeClientError
-from .center_ws import (DEFAULT_WS_PATH, CenterEventChannel, CenterWsUnavailable,
-                        ws_url_from_server_url)
 from .command_journal import CommandJournal
 from .event_queue import append_event
-from .config import as_bool, load_config, save_config, write_example_config
+from .config import load_config, save_config, write_example_config
 from .platforms import get_platform
 from .watcher import LogWatcher
-from .seat_scope import SCOPE_BLOCK, SeatScope
 from .message_timing import (TIMING_FIELDS, FUTURE_TOLERANCE_SECONDS,
                              TAKEOVER_PARENT_MAX_AGE_SECONDS, epoch_seconds,
                              stamp_message, history_ready, command_expired, queue_metrics)
 
 log = logging.getLogger("pdd.bridge")
 
-# WS 通道保留多少条最近事件用于 result 落死信（result 只推给在线连接，无需长期留）
-_WS_RECENT_LIMIT = 5000
-
 # 出站内容归一化：去掉 emoji/标点/空白，只留字母数字与汉字，用于判定“同一次发送”
 _OUTGOING_KEEP = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
-
-# 跨数据源入站判重窗口的下限（秒）。PDD 上有**两条腿**同时收消息：探域日志（实时）
-# 和 CDP 周期回拉（补漏）。两条腿各自维护判重表、互不知情，同一条买家消息会被各报
-# 一次 —— 实测间隔 15~18s，台账里同一个 event_id 出现两条 captured。中心按 event_id
-# 幂等去了重，所以代价只是流量翻倍 + 日志噪音，买家不会被打扰两次。
-# 账本必须放在两条腿的汇合点（本文件的 _on_local_event），窗口要盖过回拉间隔。
-_INGEST_DEDUP_MIN_SECONDS = 600.0
-_INGEST_DEDUP_PULL_FACTOR = 5.0
-# 表涨到这么多才考虑清理（清理按窗口 cutoff 判定，清掉的条目永远不可能再命中）
-_INGEST_DEDUP_PRUNE_THRESHOLD = 5000
-_INGEST_DEDUP_PRUNE_INTERVAL_SECONDS = 60.0
-
-
-def _ingest_window_seconds(cfg: dict) -> float:
-    """跨数据源判重窗口（秒）。
-
-    自动值 = max(下限, history_pull_seconds × 倍数)。窗口必须盖过 CDP 腿的回拉间隔，
-    否则两条腿报同一条时账本已经过期，照样双投。配置里显式给了就用配置值，但不允许
-    短于下限 —— 短了等于没有判重。
-    """
-    try:
-        pull_seconds = float(cfg.get("history_pull_seconds") or 0.0)
-    except (TypeError, ValueError):
-        pull_seconds = 0.0
-    auto = max(_INGEST_DEDUP_MIN_SECONDS, pull_seconds * _INGEST_DEDUP_PULL_FACTOR)
-    try:
-        window = float(cfg.get("cross_source_dedup_seconds") or auto)
-    except (TypeError, ValueError):
-        window = auto
-    return max(window, _INGEST_DEDUP_MIN_SECONDS)
-
-
-def _build_seat_scope(agent) -> SeatScope:
-    """建本机席位集合。provider 从 CDP 会话取账号（= 工作台打开的标签页）。"""
-    def _accounts():
-        """本机席位：CDP 会话 ∪ 网关学到的 seat_accounts。
-
-        **为什么不能只看 CDP**：CDP 扫的是"聊天标签页开着的"店铺，不等于
-        "我登录的店铺"。生产事故（2026-09-21 真实机器）就是买家消息的席位
-        没被 CDP 探测到 -> 被判"不是本机" -> 拦下 -> 浮窗不显示 -> 超时。
-        `seat_accounts` 是网关从真实流过的消息里学到的本工位账号，作为补充。
-        """
-        out = []
-        source = getattr(agent, "pddbridge_source", None)
-        for session in list(getattr(source, "sessions", None) or []):
-            account = str(getattr(session, "account", "") or "").strip()
-            if account:
-                out.append(account)
-        try:
-            cfg_path = Path(str((getattr(agent, "cfg", None) or {}).get("config_path")
-                               or "bridge_config.json"))
-            state_path = cfg_path.resolve().parent / "data" / "seat_local_state.json"
-            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-            for account in (state.get("seat_accounts") or {}).values():
-                account = str(account or "").strip()
-                if account:
-                    out.append(account)
-        except (OSError, ValueError, TypeError, AttributeError):
-            pass
-        return out
-
-    return SeatScope(getattr(agent, "cfg", None) or {}, accounts_provider=_accounts)
-
-
-def _taobao_store_account(account: Any) -> str:
-    """Return the store portion of a Taobao ``store:staff`` login name."""
-    account = str(account or "").strip()
-    separators = [index for index in (account.find(":"), account.find("：")) if index >= 0]
-    if not separators:
-        return account
-    return account[:min(separators)].strip() or account
 
 
 def _command_result_for_ack(result: dict) -> dict:
@@ -160,8 +84,6 @@ def _same_seat(left: Any, right: Any) -> bool:
 
 
 class BridgeAgent:
-    # 保护"惰性建实例锁"这一步的类级锁（见 _claim_command 的双检锁说明）。
-    _claim_init_lock = threading.Lock()
     def __init__(self, cfg: Optional[dict] = None) -> None:
         self.cfg = cfg or load_config()
         self.platform = get_platform(self.cfg.get("platform") or "pdd")
@@ -171,15 +93,25 @@ class BridgeAgent:
             self.cfg["agent_id"],
             self.cfg.get("agent_name") or "",
             self.cfg.get("device_id") or "",
+            websocket_enabled=bool(self.cfg.get("websocket_enabled", False)),
+            websocket_url=str(self.cfg.get("websocket_url") or ""),
+            websocket_path=str(self.cfg.get("websocket_path") or "/api/bridge/v1/ws"),
+            websocket_max_inflight=int(self.cfg.get("websocket_max_inflight") or 64),
         )
-        # 中心 WS 上行通道（可选，默认关）。只替换 upload_events；register /
-        # heartbeat / 指令长轮询 / 指令结果回报仍走 HTTP —— 服务端目前只实现了
-        # 上行 event + ack/result，下行指令没有 WS 通道。
-        self.center_ws = self._build_center_ws()
-        # result 帧回来看不到原始事件(已出队)，这里留一份有界的最近事件用于落死信。
-        self._ws_recent: "OrderedDict[str, dict]" = OrderedDict()
-        self._ws_recent_lock = threading.Lock()
         self._stop = threading.Event()
+        # Wake uploads as soon as a live event is queued; heartbeat remains the fallback.
+        self._events_wakeup = threading.Event()
+        try:
+            upload_workers = int(self.cfg.get("upload_concurrency") or 8)
+        except (TypeError, ValueError):
+            upload_workers = 8
+        self._upload_workers = max(1, min(upload_workers, 16))
+        self._upload_executor = ThreadPoolExecutor(
+            max_workers=self._upload_workers,
+            thread_name_prefix="bridge-event-upload",
+        )
+        self._upload_dispatch_lock = threading.Lock()
+        self._upload_active = 0
         self._pending: Deque[dict] = deque()
         self._pending_lock = threading.Lock()
         self._accounts_seen: Dict[str, float] = {}
@@ -189,13 +121,6 @@ class BridgeAgent:
         self._last_error = ""
         self._last_status: dict = {}
         self._commands_done: set[str] = set()
-        # 命令通道的可观测计数。原来"有没有收到指令"在日志和心跳里都看不出来：
-        # 长轮询失败只写内存、指令缺 id 直接丢，出了事只能靠翻日志猜（实测吃过亏）。
-        self._cmd_stats: Dict[str, Any] = {
-            "poll_ok": 0, "poll_fail": 0, "received": 0, "sent_ok": 0,
-            "no_id": 0, "last_received_at": 0.0, "last_error": "",
-        }
-        self._cmd_warn_at: Dict[str, float] = {}
         # 投递台账: 每条消息的 采集/本地工作台/中心 三个环节逐条留痕
         from .ledger import DeliveryLedger
         queue_file = str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl")
@@ -203,13 +128,6 @@ class BridgeAgent:
             self.cfg.get("delivery_ledger_path") or queue_file.replace(".jsonl", "_ledger.jsonl"),
             enabled=bool(self.cfg.get("delivery_ledger_enabled", True)),
         )
-
-        # 跨数据源入站判重：两条腿（探域日志 watcher / CDP 周期回拉）各有各的判重表，
-        # 同一条买家消息会被两边各报一次（实测间隔 15~18s）。这里按平台消息 id 记一本
-        # 共用账本，放在两条腿唯一的汇合点。窗口自动取 max(下限, 回拉间隔 × 倍数)。
-        self._ingest_seen: Dict[str, float] = {}
-        self._ingest_stats: Dict[str, Any] = {"dropped": 0, "last_drop_at": 0.0}
-        self._ingest_window = _ingest_window_seconds(self.cfg)
         self.watcher = LogWatcher(
             self.cfg["tanyu_log_dir"],
             self._on_local_event,
@@ -283,18 +201,12 @@ class BridgeAgent:
         shop_map = self.cfg.get("shop_map") if isinstance(self.cfg.get("shop_map"), dict) else {}
         mapped = str(shop_map.get(account) or "").strip()
         if mapped:
-            if self.platform.name == "taobao" and mapped.startswith("tb_nick_"):
-                store_account = _taobao_store_account(account)
-                if store_account != account:
-                    return f"tb_nick_{store_account}"
             return mapped
         if account.startswith("cs_"):
             mall = account[3:].split(":", 1)[0].split("_", 1)[0]
             return f"mall_{mall}" if mall.isdigit() else ""
         if account.startswith(("mall_", "tb_")):
             return account
-        if self.platform.name == "taobao":
-            return f"tb_nick_{_taobao_store_account(account)}"
         return ""
 
     def _account_allowed(self, account: Any) -> bool:
@@ -405,6 +317,11 @@ class BridgeAgent:
         return False
 
     def _on_local_event(self, msg: dict) -> None:
+        from .pdd_system_messages import is_pdd_system_event
+        if (msg.get("platform") or self.platform.name) == "pdd" and is_pdd_system_event(msg):
+            msg = {**msg, "is_diagnostic": True, "skipped_reason": "pdd_operator_notice"}
+            log.info("PDD operator notice excluded from buyer stream msg_id=%s account=%s",
+                     msg.get("msg_id"), msg.get("account"))
         msg = stamp_message(msg)
         if msg.get("is_history"):
             ts = float(msg.get("ts") or 0)
@@ -424,16 +341,10 @@ class BridgeAgent:
                 if (max_age > 0 and (time.time() - ts) > max_age) or \
                         (user_only and str(msg.get("role") or "") != "user"):
                     return
-        # 不串台：本机工作台只该看到本机登录的席位。判定放在 account 解析之后、
-        # 记账之前 —— 被拦下的消息不该污染 _accounts_seen / _recent_buyers。
-        # 生产版在 run_pdd_client.on_local_event 已先拦过一道，这里是精简版的兜底。
-        if not self._seat_scope_allows(msg):
-            self._note_out_of_scope(msg)
-            return
         account = str(msg.get("account") or "").strip()
         if account:
             self._accounts_seen[account] = time.time()
-        if account and msg.get("buyer_id") and not msg.get("is_history"):
+        if account and msg.get("buyer_id") and not msg.get("is_history") and not msg.get("is_diagnostic"):
             # 记录“最近活跃会话”（只看实时帧），供 CDP 周期补拉历史
             recent = getattr(self, "_recent_buyers", None)
             if recent is None:
@@ -494,12 +405,6 @@ class BridgeAgent:
                     self._ledger_note(event["event_id"], "center_duplicate_skipped", event=event,
                                         detail="已在本机待发队列中")
                     return
-                if self._cross_source_duplicate(event):
-                    # 另一条腿已经报过这一条（平台消息 id 相同）。中心按 event_id
-                    # 幂等，不会重复回复，但流量和日志都会翻倍。
-                    self._ledger_note(event["event_id"], "cross_source_duplicate_skipped",
-                                      event=event, detail="另一数据源已上报同一条")
-                    return
                 if self._merge_outgoing_duplicate(event):
                     drop_duplicate = True
                 else:
@@ -521,44 +426,19 @@ class BridgeAgent:
                      event["event_id"], str(event.get("msg_id") or "")[:100], event.get("ts"),
                      event.get("captured_at_ms"), event.get("enqueued_at"),
                      bool(event.get("is_history")), str(event.get("source") or "")[:40])
+            wakeup = getattr(self, "_events_wakeup", None)
+            if wakeup is not None:
+                wakeup.set()
+            # Submit from the capture thread as well as waking the control loop.
+            # The control loop intentionally polls at a low rate; relying on it
+            # alone can merge a burst of events into one worker and make later
+            # events wait behind a slow /events request.
+            self._schedule_event_flush()
         if self._local_ingest_queue is not None:
             try:
                 self._local_ingest_queue.put_nowait(event)
             except Exception:
                 pass
-
-    def _seat_scope_allows(self, event: dict) -> bool:
-        """归属闸门（精简版 / 上传兜底共用）。
-
-        用惰性访问器而不是直接 self._seat_scope：测试大量用
-        `object.__new__(BridgeAgent)` 跳过 __init__，直接访问新属性会 AttributeError
-        打挂整条链路（v0.9.0 / v0.9.2 / v0.9.4 各踩过一次）。
-        """
-        scope = getattr(self, "_seat_scope", None)
-        if scope is None:
-            try:
-                scope = self._seat_scope = _build_seat_scope(self)
-            except Exception as exc:
-                log.debug("SeatScope 构造失败, 本批不做归属过滤: %s", exc)
-                return True
-        return scope.allows(event.get("account"), event.get("role")) != SCOPE_BLOCK
-
-    def _note_out_of_scope(self, msg: dict) -> None:
-        """精简版拦下消息时的留档 + 计数。
-
-        生产版在 `run_pdd_client._archive_out_of_scope` 里有完整实现（写
-        `*_out_of_scope.jsonl`）；这里只做计数与一条节流日志 —— 精简版没有
-        生产版的本地队列路径，不重复实现一份。
-        """
-        counters = getattr(self, "_scope_out_of_scope", None)
-        if counters is None:
-            counters = self._scope_out_of_scope = {"count": 0, "last": ""}
-        counters["count"] += 1
-        counters["last"] = str(msg.get("account") or "")
-        self._log_throttled(
-            "out_of_scope",
-            "消息不是本机席位，已拦下（account=%r）—— 本机席位见 status 的 seat_scope.seats",
-            msg.get("account"))
 
     def _local_ingest_loop(self) -> None:
         """串行推送到本机 gateway 的 local-seat ingest 端点（daemon，不阻塞主链路）。"""
@@ -671,30 +551,10 @@ class BridgeAgent:
             acc for acc, ts in self._accounts_seen.items()
             if now - ts < 3600
         )
-        ob = {}
-        # 中心 WS 上行通道的运行状态：连没连上、发了多少帧、收到多少 ack/result。
-        # 放进心跳是为了避免"以为在跑 WS、其实一直在走 HTTP"这种静默降级。
-        center_ws_status: dict = {}
-        center_ws_channel = getattr(self, "center_ws", None)
-        if center_ws_channel is not None:
-            try:
-                center_ws_status = center_ws_channel.status()
-            except Exception as exc:  # noqa: BLE001
-                center_ws_status = {"error": str(exc)}
-        if self.platform.name == "taobao":
-            try:
-                from .openbot_ws import status_snapshot
-                from .qn_inject import inject_status
-
-                ob = {**status_snapshot(), "inject": inject_status()}
-            except Exception as exc:
-                ob = {"openbot_error": str(exc)}
         # Shop identity for brain-server merge (1 shop many CS accounts).
         shops: List[dict] = []
         seen_shop_acc: set = set()
         for acc in accounts:
-            # Includes Taobao nicks (seller -> tb_nick_<seller>) so a shop can
-            # be discovered before it has an explicit shop_map entry.
             sid = self._account_shop_id(acc)
             if not sid:
                 continue
@@ -748,37 +608,19 @@ class BridgeAgent:
             "pending_events": len(self._pending),
             "pending_command_acks": self.command_journal.pending_count(),
             "watcher_stats": watcher_stats,
-            # CDP 源的完整状态（会话列表 / drops / pump 轮转计数）。10 店铺场景
-            # 要判断"预算和轮询调得对不对"只能看这里 —— 尤其 pump.round_budget_hit。
-            "pddbridge": cdp_stats,
-            # 命令通道可见性：收没收到指令、轮询有没有在报错。原来这些只能靠翻日志。
-            #   received=0 且 poll_fail 在涨  → 长轮询本身出错
-            #   received=0 且 poll_ok 在涨   → 轮询正常但中心没派发（查中心侧）
-            "commands": dict(self._cmd_counters()),
-            "cross_source_dedup": dict(
-                self._ingest_stats_dict(),
-                window_seconds=round(
-                    float(getattr(self, "_ingest_window", _INGEST_DEDUP_MIN_SECONDS)), 1),
-                table_size=len(self._ingest_seen_table()),
-            ),
-            "dll_ready": ch.get("dll_ready") or bool(ob.get("openbot_connected")),
-            "receive_ready": bool(ch.get("receive_ready", self.platform.name != "taobao")),
+            "dll_ready": bool(ch.get("dll_ready")),
+            "send_ready": bool(ch.get("send_ready", ch.get("dll_ready"))),
+            "send_channel": str(ch.get("send_channel") or ""),
+            "receive_ready": bool(ch.get("receive_ready", True)),
             "dll_port": ch.get("dll_port"),
             "cdp_port": cdp_port,
             "workbench_pid": ch.get("workbench_pid"),
             "port_discovery": ch.get("port_discovery"),
             "channel_hint": ch.get("hint") or "",
-            "hint": (
-                (
-                    "openbot 桥已连接，可发送"
-                    if ob.get("openbot_connected")
-                    else ch.get("hint") or ""
-                )
-            ),
+            "hint": ch.get("hint") or "",
             "last_error": self._last_error or src_last_error or self.watcher.last_error,
+            "websocket": self.client.transport_status(),
             "dry_run": bool(self.cfg.get("dry_run")),
-            "openbot": ob,
-            "center_ws": center_ws_status,
         }
 
     def _allowlist_enforced(self) -> bool:
@@ -848,10 +690,6 @@ class BridgeAgent:
         previous = str(self.cfg.get("agent_id") or "").strip()
         self.cfg["agent_id"] = resolved
         self.client.agent_id = resolved
-        # WS 握手要带 X-Agent-Id，身份以服务端解析结果为准，这里同步过去。
-        channel = getattr(self, "center_ws", None)
-        if channel is not None:
-            channel.agent_id = resolved
         if resolved == previous:
             return False
         try:
@@ -877,102 +715,8 @@ class BridgeAgent:
                             {**event, "refused_reason": reasons[event_id]}, ensure_ascii=False) + "\n")
                         self._ledger_note(event_id, "dead_letter", event=event,
                                             detail=reasons[event_id])
-                        # 这条从此不会再重发（本机侧），必须放开判重身份 ——
-                        # 否则另一条腿带完整字段的救援副本会被永久挡住。
-                        self._ingest_release(event)
         except OSError as exc:
             log.warning("record refused events failed: %s", exc)
-
-    def _build_center_ws(self) -> Optional[CenterEventChannel]:
-        """按配置建中心 WS 通道。默认关；任何异常都只记日志并返回 None（走 HTTP）。"""
-        if not as_bool(self.cfg.get("center_ws_enabled"), False):
-            return None
-        try:
-            # 显式配置优先（WS 走独立入口时用），否则从 server_url 推导。
-            url = str(self.cfg.get("center_ws_url") or "").strip() or ws_url_from_server_url(
-                self.cfg.get("server_url") or "",
-                str(self.cfg.get("center_ws_path") or DEFAULT_WS_PATH),
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("中心 WS 地址推导失败，改用 HTTP 上行: %s", exc)
-            return None
-        try:
-            return CenterEventChannel(
-                ws_url=url,
-                token=str(self.cfg.get("agent_token") or ""),
-                agent_id=str(self.cfg.get("agent_id") or ""),
-                device_id=str(self.cfg.get("device_id") or ""),
-                platform=self.platform.name,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("中心 WS 通道创建失败，改用 HTTP 上行: %s", exc)
-            return None
-
-    def _upload_batch(self, batch: List[dict]) -> dict:
-        """优先走中心 WS，不可用时回落 HTTP。
-
-        两条路径共用服务端同一张落表与同一 event_id 唯一约束，所以即使在
-        `send_events` 已经把部分帧发出去之后才回落，重发也不会双投。
-        """
-        channel = getattr(self, "center_ws", None)
-        if channel is not None and channel.available:
-            try:
-                timeout = float(self.cfg.get("center_ws_ack_timeout_seconds") or 10.0)
-            except (TypeError, ValueError):
-                timeout = 10.0
-            try:
-                # 测试/模拟里 agent 常用 object.__new__ 绕过 __init__，这两个属性
-                # 可能不存在；缺失就跳过留痕，不影响上行本身。
-                lock = getattr(self, "_ws_recent_lock", None)
-                recent = getattr(self, "_ws_recent", None)
-                if lock is not None and recent is not None:
-                    with lock:
-                        for event in batch:
-                            event_id = str(event.get("event_id") or "")
-                            if event_id:
-                                recent[event_id] = event
-                        while len(recent) > _WS_RECENT_LIMIT:
-                            recent.popitem(last=False)
-                return channel.send_events(batch, timeout=timeout)
-            except CenterWsUnavailable as exc:
-                self._last_error = f"center_ws 回落 HTTP: {exc}"
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = f"center_ws 异常回落 HTTP: {exc}"
-                log.warning("中心 WS 上行异常，本批回落 HTTP: %s", exc)
-        return self.client.upload_events(batch)
-
-    def _drain_center_ws_results(self) -> None:
-        """消费业务终态 result：processed/retry 记账，rejected 落死信。
-
-        result 服务端**不补投**，所以断线期间的结果会丢；这里只处理在线期间收到的。
-        出队不依赖 result（ack 已表示落表），所以丢 result 不会丢消息。
-        """
-        channel = getattr(self, "center_ws", None)
-        if channel is None:
-            return
-        rows = channel.drain_results()
-        if not rows:
-            return
-        lock = getattr(self, "_ws_recent_lock", None)
-        recent = getattr(self, "_ws_recent", None)
-        for row in rows:
-            event_id = str(row.get("event_id") or "")
-            status = str(row.get("status") or "")
-            reason = str(row.get("error_code") or status or "")
-            event = None
-            if lock is not None and recent is not None:
-                with lock:
-                    event = recent.pop(event_id, None)
-            event = event or {"event_id": event_id}
-            if status == "rejected":
-                self._ledger_note(event_id, "center_refused", event=event, detail=reason)
-                # 复用 HTTP 路径同一套死信文件，人工可补推。
-                self._record_event_loss([event], [(event, f"result:{reason}")])
-            elif status == "processed":
-                self._ledger_note(event_id, "center_processed", event=event)
-            else:
-                # retry：服务端自己退避重试（≤8 次），客户端不需要动作。
-                self._ledger_note(event_id, "center_retry", event=event, detail=reason)
 
     def _upload_batch_size(self) -> int:
         """每批上送中心的条数。突发进线时批越小、批数越多，而每批都要等一次本地优先
@@ -997,10 +741,6 @@ class BridgeAgent:
             for event in self._pending:
                 event.update(stamp_message(event, now=now))
             ready = [e for e in self._pending
-                     # 兜底：_load_local_queue / replace_pending_event 会把旧事件直接
-                     # 塞进 _pending，绕过 _on_local_event 的归属闸门 —— 这里再挡一道，
-                     # 否则重启后历史串台事件照样上报中心。
-                     if self._seat_scope_allows(e)
                      if str(e.get("event_id") or "") not in inflight
                      and e.get("event_id") not in (blocked_ids or set())
                      and history_ready(e, history_now if e.get("is_history") else now)]
@@ -1016,12 +756,13 @@ class BridgeAgent:
                 return
             # 标记在途：多路上传并发时，各批互不重叠
             inflight.update(str(e.get("event_id") or "") for e in batch)
-        log.info("event upload batch=%d oldest_wait=%.3fs ids=%s", len(batch),
+        log.info("event upload start worker=%s batch=%d oldest_wait=%.3fs ids=%s",
+                 threading.current_thread().name, len(batch),
                  queue_metrics(batch)["oldest_wait_seconds"], [e.get("event_id") for e in batch])
         queue_changed = False
         terminal_ids = set()
         try:
-            response = self._upload_batch(batch)
+            response = self.client.upload_events(batch)
             self._upload_retry_delay = 0.5
             with self._pending_lock:
                 ack_version = (response or {}).get("ack_version")
@@ -1056,10 +797,6 @@ class BridgeAgent:
                         and str(item.get("status") or "") in {"ignored", "rejected"}
                     ]
                     self._ledger_center_acks(acknowledgements, sent_by_id)
-                    # 被拒收的一律放开判重占用（含后面会被 losses 过滤掉的
-                    # plugin_send_echo）—— 它们同样没送达中心。
-                    for _refused_event, _refused_reason in refused:
-                        self._ingest_release(_refused_event)
                     # 只按 event_id 就地移除“本批且已终态”的事件。原来的 clear+extend 依赖
                     # 更早的快照，多路并发上传时会互相覆盖（丢事件）。
                     batch_event_ids = {
@@ -1118,7 +855,8 @@ class BridgeAgent:
                 self._rewrite_local_queue()
             terminal_count = sum(
                 1 for e in batch if str(e.get("event_id") or "") in terminal_ids)
-            log.info("event upload terminal=%d remaining=%d terminal_ids=%s",
+            log.info("event upload terminal worker=%s terminal=%d remaining=%d terminal_ids=%s",
+                     threading.current_thread().name,
                      terminal_count, len(self._pending),
                      [e["event_id"] for e in batch if e["event_id"] in terminal_ids])
         except BridgeClientError as exc:
@@ -1131,112 +869,29 @@ class BridgeAgent:
             with self._pending_lock:
                 self._inflight_ids -= {str(e.get("event_id") or "") for e in batch}
 
-    # ------------------------------------------------------------------ 出站并发池
-    # 背景（0.7.5 r2 的 P0）：一条回复要等平台回执，实测最长 10s，所以单线程出站的
-    # 上限只有约 6 条/分钟/工位，而峰值需要约 38 条/分钟/工位。把「取指令」与「发送」
-    # 解耦，取指令循环就不再被上一条的发送确认超时占住。
-    #
-    # 开关：**owner 2026-09-21 明确决定「默认全开」**（不是仓库默认的 fail-closed
-    # 白名单）。判定顺序固定为：
-    #   1) command_sender_enabled = false               -> 全关（回到改动前行为）
-    #   2) 店铺在 command_sender_disabled_shop_ids 里    -> 只关这个店
-    #   3) command_sender_shop_ids 非空                  -> 只有命中的店铺开（窄灰度）
-    #   4) 否则                                         -> 开
-    def _ensure_sender_state(self) -> None:
-        """惰性初始化发送池状态（兼容绕过 __init__ 的构造路径）。"""
-        if getattr(self, "_sender_queue", None) is None:
-            self._sender_queue = queue.Queue(maxsize=64)
-        if not hasattr(self, "_sender_threads"):
-            self._sender_threads = []
-        if not hasattr(self, "_sender_conv_locks"):
-            self._sender_conv_locks = {}
-        if not hasattr(self, "_sender_conv_locks_guard"):
-            self._sender_conv_locks_guard = threading.Lock()
-        if not hasattr(self, "_sender_pool_guard"):
-            self._sender_pool_guard = threading.Lock()
-
-    def _command_sender_shop_ids(self) -> List[str]:
-        allowlist = self.cfg.get("command_sender_shop_ids")
-        if not isinstance(allowlist, (list, tuple, set)):
-            return []
-        return [str(item or "").strip() for item in allowlist if str(item or "").strip()]
-
-    @staticmethod
-    def _shop_in_list(value: Any, shop_id: str) -> bool:
-        if not shop_id or not isinstance(value, (list, tuple, set)):
-            return False
-        allowed = {str(item or "").strip() for item in value if str(item or "").strip()}
-        return shop_id in allowed
-
-    def _command_sender_on(self) -> bool:
-        """总开关（默认开）。false 时整条并发发送路径完全不启用。"""
-        return bool(self.cfg.get("command_sender_enabled", True))
-
-    def _command_sender_enabled(self, account: Any) -> bool:
-        """这个店铺的出站发送是否交给并发发送池（默认开，可总关 / 单店关 / 窄白名单）。"""
-        if not self._command_sender_on():
-            return False
-        shop_id = str(self._account_shop_id(account) or "").strip()
-        if self._shop_in_list(self.cfg.get("command_sender_disabled_shop_ids"), shop_id):
-            return False
-        allowlist = self._command_sender_shop_ids()
-        if allowlist:
-            return self._shop_in_list(allowlist, shop_id)
-        return True
-
-    def _sender_conversation_lock(self, account: Any, buyer_id: Any) -> threading.Lock:
-        """同一买家保持串行，避免并行发送打乱回复顺序。"""
-        self._ensure_sender_state()
-        key = f"{str(account or '').strip()}|{str(buyer_id or '').strip()}"
-        with self._sender_conv_locks_guard:
-            lock = self._sender_conv_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._sender_conv_locks[key] = lock
-            return lock
-
-    def _sender_worker_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                cmd = self._sender_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                account = str(cmd.get("account") or "").strip()
-                buyer_id = str(cmd.get("buyer_id") or "").strip()
-                with self._sender_conversation_lock(account, buyer_id):
-                    self._execute_command(cmd)
-            except Exception:
-                # 单条命令异常不能打死发送线程，否则出站会整体停摆。
-                log.exception("command sender worker failed")
-            finally:
-                self._sender_queue.task_done()
-
-    def _start_sender_pool(self) -> None:
-        """启动并发发送池。幂等、线程安全；总开关关掉时一个线程都不建。"""
-        self._ensure_sender_state()
-        if not self._command_sender_on():
+    def _schedule_event_flush(self) -> None:
+        """Submit upload work without blocking the agent/control loop."""
+        # Lightweight test doubles may call _on_local_event without running the
+        # full constructor; the normal process always initializes the executor.
+        if not hasattr(self, "_upload_executor") or not hasattr(self, "_upload_dispatch_lock"):
             return
-        with self._sender_pool_guard:
-            if self._sender_threads:
+        with self._upload_dispatch_lock:
+            if self._upload_active >= self._upload_workers:
                 return
+            self._upload_active += 1
+
+        def worker() -> None:
             try:
-                workers = int(self.cfg.get("command_sender_workers") or 6)
-            except (TypeError, ValueError):
-                workers = 6
-            workers = max(1, min(workers, 8))
-            for index in range(workers):
-                thread = threading.Thread(
-                    target=self._sender_worker_loop,
-                    name=f"bridge-command-sender-{index + 1}",
-                    daemon=True,
-                )
-                thread.start()
-                self._sender_threads.append(thread)
-            log.info("出站并发发送池已启动：%d 个 worker，范围=%s",
-                     workers,
-                     ("窄白名单 " + ", ".join(self._command_sender_shop_ids()))
-                     if self._command_sender_shop_ids() else "全部店铺（默认全开）")
+                self._flush_events()
+            finally:
+                with self._upload_dispatch_lock:
+                    self._upload_active -= 1
+
+        try:
+            self._upload_executor.submit(worker)
+        except RuntimeError:
+            with self._upload_dispatch_lock:
+                self._upload_active = max(0, self._upload_active - 1)
 
     def _apply_session_state(self, cmd: dict) -> dict:
         """把中心下发的会话状态（转人工 / AI 开关）落地到本机工作台。
@@ -1271,403 +926,175 @@ class BridgeAgent:
             log.warning("apply session_state locally failed: %s", exc)
             return {"ok": False, "status": "failed", "real_send": False, "error": str(exc)}
 
-    def _cmd_counters(self) -> Dict[str, Any]:
-        """命令通道计数表（惰性创建）。
-
-        用 getattr 兜底而不是直接 self._cmd_stats：测试里大量用
-        `object.__new__(BridgeAgent)` 造 agent（跳过 __init__），直接访问属性会
-        AttributeError 把整条命令处理打挂 —— v0.9.0 接 WS 时同一个坑已经踩过一次。
-        """
-        counters = getattr(self, "_cmd_stats", None)
-        if counters is None:
-            counters = {"poll_ok": 0, "poll_fail": 0, "received": 0, "sent_ok": 0,
-                        "no_id": 0, "last_received_at": 0.0, "last_error": ""}
-            self._cmd_stats = counters
-        return counters
-
-    def _ingest_seen_table(self) -> Dict[str, float]:
-        """跨数据源判重表（惰性创建）。
-
-        与 _cmd_counters 同理：测试大量用 `object.__new__(BridgeAgent)` 造 agent
-        （跳过 __init__），直接访问属性会 AttributeError 打挂整条消息处理。
-        """
-        table = getattr(self, "_ingest_seen", None)
-        if table is None:
-            table = self._ingest_seen = {}
-        return table
-
-    def _ingest_stats_dict(self) -> Dict[str, Any]:
-        """判重计数表（同样惰性创建）。"""
-        stats = getattr(self, "_ingest_stats", None)
-        if stats is None:
-            stats = self._ingest_stats = {"dropped": 0, "last_drop_at": 0.0}
-        return stats
-
-    @staticmethod
-    def _ingest_identity(event: dict) -> str:
-        """跨数据源判重用的身份 —— 平台消息 id。
-
-        只认平台给的 id。合成的兜底 id（内容+时间哈希、callback-/frame-/imws- 前缀）
-        可能撞哈希，拿它判重会误杀真实消息（同 pddbridge_source._is_fallback_id 的
-        理由）。认不出来就返回 ""，调用方直接放行 —— 宁可重复也不丢。
-        """
-        if event.get("is_diagnostic"):
-            return ""
-        for key in ("platform_message_id", "msg_id"):
-            identity = str(event.get(key) or "").strip()
-            if not identity:
-                continue
-            low = identity.lower()
-            if low.startswith(("callback-", "frame-", "imws-")):
-                continue
-            if len(identity) == 24 and all(ch in "0123456789abcdef" for ch in low):
-                continue
-            return identity
-        return ""
-
-    def _ingest_release(self, event: dict) -> None:
-        """放开一条事件占用的跨源判重身份。
-
-        **必须有**：判重表记的是"这条已经被另一条腿报过了"，但那只在**那次上报真的
-        送出去了**的前提下才成立。
-
-        实测踩的坑（2026-09-21 00:31 报、00:36 被拦）：探域日志腿上报的副本 account
-        为空 → 中心拒收 → 落死信（**从没到达中心**）；5 分钟后 CDP 腿带着完整 account
-        重新上报同一条，却被判重当"重复"挡在门外 —— **把"延迟 5 分钟送达"变成了
-        "永久丢失"**。这在 v0.9.3（加判重之前）是能救回来的。
-
-        所以：只要一条事件最终**没送达中心**（拒收/死信），就必须把它占的身份还回去，
-        另一条腿的救援副本才有机会进来。
-        """
-        identity = self._ingest_identity(event)
-        if identity:
-            self._ingest_seen_table().pop(identity, None)
-
-    def _prune_ingest_seen(self, now: float) -> None:
-        """清掉已经出窗口的条目。判据是 `now - last < 窗口`，窗口外的条目再也不可能
-        命中，清掉不改变任何判重决策；不清的话 2-3 条/秒跑满一天班就是几十万条。"""
-        table = self._ingest_seen_table()
-        if len(table) <= _INGEST_DEDUP_PRUNE_THRESHOLD:
-            return
-        if now - getattr(self, "_ingest_pruned_at", 0.0) < _INGEST_DEDUP_PRUNE_INTERVAL_SECONDS:
-            return
-        self._ingest_pruned_at = now
-        cutoff = now - float(getattr(self, "_ingest_window", _INGEST_DEDUP_MIN_SECONDS))
-        for key, last in list(table.items()):
-            if last < cutoff:
-                table.pop(key, None)
-
-    def _cross_source_duplicate(self, event: dict) -> bool:
-        """True = 本条已被**另一个**数据源报过，应丢弃。
-
-        探域日志 watcher 与 CDP 周期回拉是两条独立管线，各自判重、互不知情 ——
-        同一条买家消息会被两边各报一次（实测间隔 15~18s，台账里同一个 event_id
-        出现两条 captured）。本方法在两条腿唯一的汇合点按平台消息 id 判重。
-
-        命中时**刷新**时间戳（同 PddbridgeSource._seen_before）：回拉会按固定节奏
-        反复重报同一条，不刷新的话累计到窗口之外就又漏一条，形成锯齿。
-        """
-        if str(event.get("role") or "") == "mall_cs":
-            # 出站有自己的合并逻辑（_merge_outgoing_duplicate：按内容前缀合并、
-            # 保留"更完整"的一条），它比"先到先得"更懂该留哪条。这里让路。
-            return False
-        identity = self._ingest_identity(event)
-        if not identity:
-            return False
-        now = time.time()
-        window = float(getattr(self, "_ingest_window", _INGEST_DEDUP_MIN_SECONDS))
-        table = self._ingest_seen_table()
-        last = table.get(identity)
-        if last is not None and now - last < window:
-            table[identity] = now
-            stats = self._ingest_stats_dict()
-            stats["dropped"] += 1
-            stats["last_drop_at"] = now
-            log.info("event 跨源重复已拦 id=%s identity=%s（另一数据源 %.1fs 前已上报）",
-                     event.get("event_id"), identity, now - last)
-            return True
-        table[identity] = now
-        self._prune_ingest_seen(now)
-        return False
-
-    def _log_throttled(self, key: str, message: str, *args, interval: float = 60.0) -> None:
-        seen = getattr(self, "_cmd_warn_at", None)
-        if seen is None:
-            seen = self._cmd_warn_at = {}
-        now = time.time()
-        if now - seen.get(key, 0.0) >= interval:
-            seen[key] = now
-            log.warning(message, *args)
-
-    def _claim_command(self, command_id: str) -> bool:
-        """原子认领一条指令。
-
-        **并发轮询的安全前提**：多条轮询可能同时拿到同一条指令，不认领就会
-        **把同一条回复发给买家两次**。先到先得，后来的直接跳过。
-        """
-        lock = getattr(self, "_command_claim_lock", None)
-        if lock is None:
-            # 双检锁：**惰性建锁本身必须线程安全**。直接
-            # `lock = self._command_claim_lock = threading.Lock()` 会有竞态 ——
-            # N 个线程同时看见 None，各自建一把，互相不互斥，同一条指令能被
-            # 认领多次（买家收到两条一样的回复）。用类级锁把初始化串起来。
-            with BridgeAgent._claim_init_lock:
-                lock = getattr(self, "_command_claim_lock", None)
-                if lock is None:
-                    lock = threading.Lock()
-                    self._command_claim_lock = lock
-                    self._command_claimed = set()
-        with lock:
-            claimed = self._command_claimed
-            if command_id in claimed or command_id in self._commands_done:
-                return False
-            claimed.add(command_id)
-            if len(claimed) > 2000:          # 有界，别无限涨
-                self._command_claimed = set(list(claimed)[-1000:])
-            return True
-
-    def _command_poll_worker(self, wait: float) -> None:
-        """并发的取指令线程（只取不补报，补报由主线程负责）。"""
-        while not self._stop.is_set():
-            try:
-                self._handle_commands(wait_seconds=wait)
-            except Exception:
-                # 单条线程异常不能杀死整个取指令通道
-                log.exception("命令处理异常（并发轮询线程继续）")
-            self._stop.wait(0.2)
-
     def _handle_commands(self, *, wait_seconds: float = 0.0) -> None:
-        counters = self._cmd_counters()
-        # **取指令是时延关键路径，必须排在补报结果之前**。原来第一行是
-        # `_retry_command_results()`，它每次一条 HTTP、超时 30 秒 —— 一挂住就把
-        # 这一轮的取指令一起推迟，表现为"中心创建指令到桥接收到差 9 秒"。
-        poll_started = time.monotonic()
+        self._retry_command_results()
+        drain_ws_commands = getattr(self.client, "drain_ws_commands", None)
+        commands = drain_ws_commands() if callable(drain_ws_commands) else []
         try:
-            commands = self.client.pull_commands(wait_seconds=wait_seconds)
+            http_commands = self.client.pull_commands(wait_seconds=wait_seconds)
+            commands.extend(http_commands)
         except BridgeClientError as exc:
-            # 长轮询失败原来是**完全静默**的：只写 _last_error，日志里一个字都没有。
-            # 于是"中心没派发"和"轮询在报错"看起来一模一样（实测因此查了很久）。
             self._last_error = f"pull_commands: {exc}"
-            counters["poll_fail"] += 1
-            counters["last_error"] = f"pull_commands: {exc}"
-            self._log_throttled(
-                "pull_commands",
-                "命令长轮询失败（累计 %d 次，收不到指令就是这个原因）: %s",
-                counters["poll_fail"], exc,
-            )
-            self._retry_command_results()      # 轮询失败也要补报，别漏一轮
-            return
-        poll_elapsed = time.monotonic() - poll_started
-        # 分段计时：周期被拖长时，日志里能看出是"取指令慢"还是"补报慢"。
-        retry_started = time.monotonic()
-        if not getattr(self, "_skip_result_retry", False):
-            self._retry_command_results()
-        retry_elapsed = time.monotonic() - retry_started
-        if poll_elapsed > wait_seconds + 2.0 or retry_elapsed > 1.0:
-            self._log_throttled(
-                "poll_breakdown",
-                "指令周期分段：取指令 %.1fs（预期约 %.1fs）+ 补报结果 %.1fs",
-                poll_elapsed, wait_seconds, retry_elapsed, interval=30.0)
-        counters["poll_ok"] += 1
-        # 灰度店铺：投入并发发送池后立刻回去拉下一条，不再被上一条的发送确认
-        # 超时（默认 10s）占住拉取循环；池子写满时退回串行执行形成背压，
-        # 避免租约过期；未命中白名单（默认）完全走原来的串行路径。
-        self._ensure_sender_state()
-        inline: List[dict] = []
+            log.warning("command pull failed status=%s: %s", exc.status, exc)
+            if not commands:
+                return
+        if commands:
+            log.info("command received=%d agent_id=%s", len(commands),
+                     getattr(self.client, "agent_id", self.cfg.get("agent_id", "")))
         for cmd in commands:
-            account = str((cmd or {}).get("account") or "").strip()
-            if self._command_sender_enabled(account):
-                try:
-                    self._sender_queue.put_nowait(cmd)
-                    continue
-                except queue.Full:
-                    log.warning("command sender pool saturated; executing inline: %s",
-                                str((cmd or {}).get("id")
-                                    or (cmd or {}).get("command_id") or ""))
-            inline.append(cmd)
-        for cmd in inline:
-            self._execute_command(cmd)
-
-    def _execute_command(self, cmd: dict) -> None:
-        """执行单条指令：认领 → 执行 → 存台账 → 回执。
-
-        原来是 `_handle_commands` 里 `for cmd in commands:` 的循环体，为了让出站
-        发送池能并发调用而原样抽出来（行为不变）。
-        """
-        counters = self._cmd_counters()
-        command_id = str(cmd.get("id") or cmd.get("command_id") or "").strip()
-        if not command_id:
-            # 缺 id 的指令原来是直接 continue、一个字都不记。中心换了字段名
-            # 就会变成"所有指令静默消失"，而日志上完全看不出来。
-            counters["no_id"] += 1
-            self._log_throttled(
-                "no_command_id",
-                "收到没有 id/command_id 的指令（累计 %d 条），已丢弃。"
-                "中心侧字段名可能变了，指令内容: %s",
-                counters["no_id"],
-                json.dumps(cmd, ensure_ascii=False)[:300],
-            )
-            return
-        if not self._claim_command(command_id):
-            # 并发的另一条轮询已经拿到它了（或本机已处理过）——
-            # 绝不能执行第二遍，否则买家会收到两条一样的回复。
-            return
-        counters["received"] += 1
-        counters["last_received_at"] = time.time()
-        existing = self.command_journal.get(command_id)
-        if existing is not None:
-            if existing.get("state") == "result_pending":
-                self._report_command_result(command_id, dict(existing.get("result") or {}))
-            return
-        if command_id in self._commands_done:
-            return
-        buyer_id = str(cmd.get("buyer_id") or "").strip()
-        account = str(cmd.get("account") or "").strip()
-        content = str(cmd.get("content") or "").strip()
-        cmd_type = str(cmd.get("type") or "send_text").strip() or "send_text"
-        meta = cmd.get("meta") if isinstance(cmd.get("meta"), dict) else {}
-        buyer_nick = str(meta.get("buyer_nick") or meta.get("nick") or "").strip()
-        log.info(
-            "command %s type=%s content_chars=%d",
-            command_id, cmd_type, len(content),
-        )
-        if not self.command_journal.start(cmd):
-            self._last_error = self.command_journal.last_error
-            log.error("command journal unavailable; refusing execution: %s", command_id)
-            return
-        if cmd_type not in {"send_text", "open_chat", "pull_history", "session_state"}:
-            result = {"ok": False, "status": "blocked", "real_send": False,
-                      "retryable": False, "error": "unsupported_command_type"}
-        elif cmd_type == "session_state":
-            log.info("command %s session_state payload=%s", command_id,
-                     json.dumps({k: v for k, v in cmd.items() if k != "id"},
-                                ensure_ascii=False)[:500])
-            result = self._apply_session_state(cmd)
-        elif self._command_expired(cmd):
-            result = {"ok": False, "status": "expired", "real_send": False,
-                      "retryable": False, "via": "expired",
-                      "error": "automatic_command_expired_or_unverifiable_time"}
-        elif cmd_type == "pull_history":
-            # 直拉历史：按买家 uid 分页取，不抢界面焦点（应答走既有 list 帧流上报）
-            src = self.pddbridge_source
-            if src is None:
-                result = {"ok": False, "status": "unsupported", "real_send": False,
-                          "error": "pddbridge source 未启动",
-                          "error_user": "当前不是 PDD 直连模式，无法拉历史"}
-            else:
-                want = cmd.get("size") or cmd.get("count") or cmd.get("limit")
-                try:
-                    want_n = int(want) if want else None
-                except (TypeError, ValueError):
-                    want_n = None
-                # 必须和上面的 size 一样兜住脏值：中心发 "0x10" 之类会让 int()
-                # 抛异常，而 _handle_commands 整体没有隔离，异常会杀死命令
-                # 长轮询线程 —— 心跳照常、界面显示运行中，但再也不执行任何指令。
-                try:
-                    start_index = int(cmd.get("start_index") or 0)
-                except (TypeError, ValueError):
-                    start_index = 0
-                result = src.pull_history(
-                    buyer_id, account, size=want_n,
-                    begin_msg_id=cmd.get("begin_msg_id") or 0,
-                    start_index=start_index,
-                    pre_msg_id=cmd.get("pre_msg_id") or 0,
-                ) or {}
-        elif cmd_type == "open_chat":
-            # Production adsorb jump: only focus conversation, no text send.
-            try:
-                open_fn = getattr(self.platform, "open_chat", None)
-                if callable(open_fn):
-                    open_cfg = dict(self.cfg)
-                    open_cfg["_effective_source"] = self._effective_source
-                    if self.pddbridge_source is not None:
-                        open_cfg["_pddbridge_source"] = self.pddbridge_source
-                    result = open_fn(buyer_id, account, buyer_nick=buyer_nick, cfg=open_cfg) or {}
+            command_id = str(cmd.get("id") or cmd.get("command_id") or "").strip()
+            if not command_id:
+                log.warning("command pull returned item without id")
+                continue
+            existing = self.command_journal.get(command_id)
+            if existing is not None:
+                if existing.get("state") == "result_pending":
+                    log.info("command %s duplicate; result_pending, retrying ACK", command_id)
+                    self._report_command_result(command_id, dict(existing.get("result") or {}))
                 else:
-                    # Fallback: attempt send_text empty is wrong; return guided failure
+                    log.info("command %s duplicate; state=%s, skip execution", command_id,
+                             existing.get("state"))
+                continue
+            if command_id in self._commands_done:
+                continue
+            buyer_id = str(cmd.get("buyer_id") or "").strip()
+            account = str(cmd.get("account") or "").strip()
+            content = str(cmd.get("content") or "").strip()
+            cmd_type = str(cmd.get("type") or "send_text").strip() or "send_text"
+            meta = cmd.get("meta") if isinstance(cmd.get("meta"), dict) else {}
+            buyer_nick = str(meta.get("buyer_nick") or meta.get("nick") or "").strip()
+            log.info(
+                "command %s type=%s content_chars=%d",
+                command_id, cmd_type, len(content),
+            )
+            if not self.command_journal.start(cmd):
+                self._last_error = self.command_journal.last_error
+                log.error("command journal unavailable; refusing execution: %s", command_id)
+                continue
+            if cmd_type not in {"send_text", "open_chat", "pull_history", "session_state"}:
+                result = {"ok": False, "status": "blocked", "real_send": False,
+                          "retryable": False, "error": "unsupported_command_type"}
+            elif cmd_type == "session_state":
+                log.info("command %s session_state payload=%s", command_id,
+                         json.dumps({k: v for k, v in cmd.items() if k != "id"},
+                                    ensure_ascii=False)[:500])
+                result = self._apply_session_state(cmd)
+            elif self._command_expired(cmd):
+                result = {"ok": False, "status": "expired", "real_send": False,
+                          "retryable": False, "via": "expired",
+                          "error": "automatic_command_expired_or_unverifiable_time"}
+            elif cmd_type == "pull_history":
+                # 直拉历史：按买家 uid 分页取，不抢界面焦点（应答走既有 list 帧流上报）
+                src = self.pddbridge_source
+                if src is None:
+                    result = {"ok": False, "status": "unsupported", "real_send": False,
+                              "error": "pddbridge source 未启动",
+                              "error_user": "当前不是 PDD 直连模式，无法拉历史"}
+                else:
+                    want = cmd.get("size") or cmd.get("count") or cmd.get("limit")
+                    try:
+                        want_n = int(want) if want else None
+                    except (TypeError, ValueError):
+                        want_n = None
+                    result = src.pull_history(
+                        buyer_id, account, size=want_n,
+                        begin_msg_id=cmd.get("begin_msg_id") or 0,
+                        start_index=int(cmd.get("start_index") or 0),
+                        pre_msg_id=cmd.get("pre_msg_id") or 0,
+                    ) or {}
+            elif cmd_type == "open_chat":
+                # Production adsorb jump: only focus conversation, no text send.
+                try:
+                    open_fn = getattr(self.platform, "open_chat", None)
+                    if callable(open_fn):
+                        open_cfg = dict(self.cfg)
+                        open_cfg["_effective_source"] = self._effective_source
+                        if self.pddbridge_source is not None:
+                            open_cfg["_pddbridge_source"] = self.pddbridge_source
+                        result = open_fn(buyer_id, account, buyer_nick=buyer_nick, cfg=open_cfg) or {}
+                    else:
+                        # Fallback: attempt send_text empty is wrong; return guided failure
+                        result = {
+                            "ok": False,
+                            "status": "unsupported",
+                            "error": "platform has no open_chat",
+                            "error_user": "当前平台桥接暂不支持一键跳转会话，请在官方客户端手动打开",
+                            "real_send": False,
+                            "via": "open_chat",
+                        }
+                    if not isinstance(result, dict):
+                        result = {"ok": bool(result), "via": "open_chat"}
+                    result.setdefault("via", "open_chat")
+                    result.setdefault("real_send", False)
+                except Exception as exc:
                     result = {
                         "ok": False,
-                        "status": "unsupported",
-                        "error": "platform has no open_chat",
-                        "error_user": "当前平台桥接暂不支持一键跳转会话，请在官方客户端手动打开",
+                        "status": "error",
+                        "error": str(exc),
+                        "error_user": f"跳转会话失败：{exc}",
                         "real_send": False,
                         "via": "open_chat",
                     }
-                if not isinstance(result, dict):
-                    result = {"ok": bool(result), "via": "open_chat"}
-                result.setdefault("via", "open_chat")
-                result.setdefault("real_send", False)
-            except Exception as exc:
+            # refuse pure ??? — usually encoding death, not a real reply
+            elif content and content.replace("?", "").strip() == "" and set(content) <= {"?"}:
                 result = {
                     "ok": False,
-                    "status": "error",
-                    "error": str(exc),
-                    "error_user": f"跳转会话失败：{exc}",
+                    "status": "blocked",
+                    "error": "content is only question marks",
+                    "error_user": "发送内容异常（只有 ???），已拦截；请重新输入中文再发",
                     "real_send": False,
-                    "via": "open_chat",
+                    "via": "blocked",
                 }
-        # refuse pure ??? — usually encoding death, not a real reply
-        elif content and content.replace("?", "").strip() == "" and set(content) <= {"?"}:
-            result = {
-                "ok": False,
-                "status": "blocked",
-                "error": "content is only question marks",
-                "error_user": "发送内容异常（只有 ???），已拦截；请重新输入中文再发",
-                "real_send": False,
-                "via": "blocked",
-            }
-        else:
-            # 先登记“本桥接（AI）要发的这条”：探域日志常常在 send_text 返回之前
-            # 就已经回显了这条消息，等发送结果回来再登记就晚了（人工会被当成智能体）。
-            self._note_self_send(account, buyer_id, content)
-            cfg = dict(self.cfg)
-            if buyer_nick:
-                cfg["_buyer_nick"] = buyer_nick
-            if self.pddbridge_source is not None:
-                cfg["_pddbridge_source"] = self.pddbridge_source
-            # 分发按「活动数据源」而非配置意图: 自动降级后收发都走探域 DLL
-            cfg["_effective_source"] = self._effective_source
-            cfg["_command_is_expired"] = lambda cmd=cmd: self._command_expired(cmd)
-            started = time.monotonic()
-            try:
-                result = self.platform.send_text(
-                    buyer_id,
-                    content,
-                    account,
-                    cfg=cfg,
-                    dry_run=bool(self.cfg.get("dry_run")),
-                )
-            except Exception as exc:
-                result = {
-                    "ok": False,
-                    "status": "indeterminate",
-                    "error": str(exc),
-                    "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
-                    "real_send": None,
-                    "via": "send_exception",
-                }
-            # 出站默认由并发发送池执行（command_sender_enabled，默认开）；只有
-            # enabled=false 或该店铺被 disabled_shop_ids 排除时才回到单线程串行。
-            # 单线程时这条耗时直接决定“AI 回复吞吐”上限：容量 ≈ 1 / 平均耗时。
-            # 实测日志里一半以上的指令→回显超过 10s，需要区分是“探域 DLL 慢”
-            # 还是“发送确认没匹配上干等到超时”。
-            duration = time.monotonic() - started
-            if isinstance(result, dict) and result.get("real_send") is True:
-                self._cmd_counters()["sent_ok"] += 1
-            log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
-                     command_id, duration,
-                     str((result or {}).get("status") or "") if isinstance(result, dict) else "",
-                     (result or {}).get("real_send") if isinstance(result, dict) else None,
-                     str((result or {}).get("via") or "") if isinstance(result, dict) else "")
-        if not isinstance(result, dict):
-            result = {"ok": bool(result), "raw_result": str(result or "")}
-        else:
-            result = dict(result)
-        result = _command_result_for_ack(result)
-        result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
-        if not self.command_journal.store_result(command_id, result):
-            self._last_error = self.command_journal.last_error
-        self._report_command_result(command_id, result)
+            else:
+                # 先登记“本桥接（AI）要发的这条”：探域日志常常在 send_text 返回之前
+                # 就已经回显了这条消息，等发送结果回来再登记就晚了（人工会被当成智能体）。
+                self._note_self_send(account, buyer_id, content)
+                cfg = dict(self.cfg)
+                if buyer_nick:
+                    cfg["_buyer_nick"] = buyer_nick
+                if self.pddbridge_source is not None:
+                    cfg["_pddbridge_source"] = self.pddbridge_source
+                # 分发按「活动数据源」而非配置意图: 自动降级后收发都走探域 DLL
+                cfg["_effective_source"] = self._effective_source
+                cfg["_command_is_expired"] = lambda cmd=cmd: self._command_expired(cmd)
+                started = time.monotonic()
+                try:
+                    result = self.platform.send_text(
+                        buyer_id,
+                        content,
+                        account,
+                        cfg=cfg,
+                        dry_run=bool(self.cfg.get("dry_run")),
+                    )
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "status": "indeterminate",
+                        "error": str(exc),
+                        "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
+                        "real_send": None,
+                        "via": "send_exception",
+                    }
+                # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
+                # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
+                # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
+                duration = time.monotonic() - started
+                log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
+                         command_id, duration,
+                         str((result or {}).get("status") or "") if isinstance(result, dict) else "",
+                         (result or {}).get("real_send") if isinstance(result, dict) else None,
+                         str((result or {}).get("via") or "") if isinstance(result, dict) else "")
+            if not isinstance(result, dict):
+                result = {"ok": bool(result), "raw_result": str(result or "")}
+            else:
+                result = dict(result)
+            result = _command_result_for_ack(result)
+            result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
+            if not self.command_journal.store_result(command_id, result):
+                self._last_error = self.command_journal.last_error
+                log.error("command %s result journal write failed: %s", command_id,
+                          self.command_journal.last_error)
+            self._report_command_result(command_id, result)
 
     def _self_send_buffer(self) -> Deque[dict]:
         buf = getattr(self, "_self_sends", None)
@@ -1759,7 +1186,8 @@ class BridgeAgent:
             response = self.client.report_command_result(command_id, result)
         except BridgeClientError as exc:
             self._last_error = f"report_command_result: {exc}"
-            log.warning("report result failed: %s", exc)
+            log.warning("report result failed command=%s status=%s: %s",
+                        command_id, exc.status, exc)
             acknowledgement = exc.payload.get("command_ack") if isinstance(exc.payload, dict) else None
             stale_lease = (
                 exc.status == 409
@@ -1781,6 +1209,8 @@ class BridgeAgent:
             committed = bool(response.get("ok"))
         if not committed:
             self._last_error = f"report_command_result: command {command_id} awaiting ACK"
+            log.warning("report result not committed command=%s response=%s",
+                        command_id, response)
             return False
         removed = self.command_journal.remove(command_id)
         self._commands_done.add(command_id)
@@ -1794,6 +1224,7 @@ class BridgeAgent:
             "write_command_journal:",
         )):
             self._last_error = ""
+        log.info("report result committed command=%s", command_id)
         return True
 
     def _retry_command_results(self) -> None:
@@ -1854,44 +1285,8 @@ class BridgeAgent:
         except (TypeError, ValueError):
             poll = 1.5
         wait = max(0.5, min(poll, 5.0))
-        # 并发轮询条数。中心那个接口每次固定要 ~9.15 秒（实测，与 wait_seconds 无关），
-        # 单线程 = 每 10.7 秒才能取一次指令；开 N 条把间隔压到约 (9.15+wait)/N。
-        # 默认 1 = 保持原行为；实测有 9 秒固定开销时建议 3。
-        try:
-            workers = int(self.cfg.get("command_poll_workers") or 3)
-        except (TypeError, ValueError):
-            workers = 1
-        workers = max(1, min(workers, 8))
-        if workers > 1:
-            # 补报结果只由主线程跑，避免同一份结果被 N 条线重复上报。
-            self._skip_result_retry = True
-            for _index in range(workers - 1):
-                threading.Thread(target=self._command_poll_worker, args=(wait,),
-                                 name="cmd-poll-%d" % _index, daemon=True).start()
-            log.info("命令长轮询并发 %d 条（取指令间隔约 %.1fs -> 约 %.1fs）",
-                     workers, 9.15 + wait, (9.15 + wait) / workers)
-        # 出站并发池：只有 command_sender_shop_ids 非空（灰度命中）才真的起线程。
-        self._start_sender_pool()
-        log.info("命令长轮询已启动（wait_seconds=%.1f）。收到指令会打 "
-                 "\"command <id> type=...\" 日志；一条都没有 = 指令没下来", wait)
         while not self._stop.is_set():
-            started = time.monotonic()
-            try:
-                self._handle_commands(wait_seconds=wait)
-            except Exception as exc:
-                # 单条异常指令绝不能杀死长轮询线程：线程静默退出后心跳和界面都还
-                # 正常，但命令再也不会被执行，且没有任何可见报错。
-                self._last_error = f"handle_commands: {exc}"
-                log.exception("命令处理异常（线程继续）")
-            # 单次轮询耗时 = 指令能迟到多久的上限。中心挂住但没超时的话，
-            # 这里一直不响，日志上就只能看到"指令怎么迟到了"，看不出被堵在哪。
-            elapsed = time.monotonic() - started
-            if elapsed > wait + 2.0:
-                self._log_throttled(
-                    "slow_poll",
-                    "命令轮询单次耗时 %.1fs（预期约 %.1fs）—— 中心那端可能挂住了，"
-                    "这期间新指令收不到，会表现为「客户收到回复迟了几秒」",
-                    elapsed, wait, interval=30.0)
+            self._handle_commands(wait_seconds=wait)
             self._stop.wait(0.2)
 
     def _heartbeat(self) -> None:
@@ -1938,32 +1333,6 @@ class BridgeAgent:
             raise SystemExit(
                 "agent_token 未配置。请编辑配置文件或设置环境变量 BRIDGE_AGENT_TOKEN"
             )
-        # Taobao/openbot: local WS inject bridge (no 探域 DevTools required)
-        if self.platform.name == "taobao":
-            try:
-                from .openbot_ws import start_openbot_bridge, status_snapshot
-                from .qn_inject import inject, inject_status
-
-                start_openbot_bridge()
-                inj = inject_status()
-                log.info("openbot inject status: %s", inj)
-                if not inj.get("all_injected"):
-                    res = inject(prefer_local=True, force=False)
-                    log.info("openbot inject attempt: %s", res)
-                    if not res.get("ok"):
-                        log.warning(
-                            "千牛桥接未全部注入成功：%s（请关闭千牛后，以管理员身份重开 Agent 再试）",
-                            res.get("error") or res,
-                        )
-                else:
-                    log.info(
-                        "千牛 openbot 桥已全部注入 count=%s mode=%s",
-                        inj.get("injected_count"),
-                        inj.get("mode"),
-                    )
-                log.info("openbot ws status: %s", status_snapshot())
-            except Exception as exc:
-                log.warning("openbot bridge bootstrap failed: %s", exc)
         try:
             reg = self.client.register()
             self._apply_registered_agent_id(reg)
@@ -1973,14 +1342,13 @@ class BridgeAgent:
             log.warning("暂时连不上中心，将自动重试：%s", exc)
             self._last_error = f"register: {exc}"
 
-        # 注册之后再起 WS：服务端按 token 解析身份，握手带的 X-Agent-Id 必须与之一致，
-        # 否则会被直接拒绝。连不上不影响 HTTP 上行。
-        if self.center_ws is not None:
-            if self.center_ws.start():
-                log.info("中心 WS 上行已启用: %s", self.center_ws.ws_url)
-            else:
-                log.warning("中心 WS 上行启动失败，继续用 HTTP 上报: %s",
-                            self.center_ws.last_error)
+        if bool(self.cfg.get("websocket_enabled", False)):
+            try:
+                self.client.connect_websocket()
+                log.info("websocket ready connection established")
+            except BridgeClientError as exc:
+                self._last_error = f"websocket: {exc}"
+                log.warning("websocket connect failed; HTTP fallback remains active: %s", exc)
 
         self._start_feeds()
         if self.platform.name == "pdd" and self.pddbridge_source is not None:
@@ -1989,19 +1357,13 @@ class BridgeAgent:
             except (TypeError, ValueError):
                 pull_seconds = 0
             if pull_seconds > 0:
-                # 主源不是 CDP 时，CDP 只用来补历史，必须切到"只补历史"模式：
-                # 否则这个源同时把实时也收了，同一条消息被两条通道各收一遍
-                # （实测 10/32 的 event_id 被上传两遍）。
-                # 这里和 _start_feeds 的二选一保持一致：数据源互斥，CDP 只做补拉。
-                self.pddbridge_source.history_only = self._effective_source != "cdp"
                 try:
                     self.pddbridge_source.start()
                 except Exception as exc:
                     log.warning("CDP 历史补拉启动失败(沿用探域日志): %s", exc)
                 else:
-                    log.info("已开启 CDP 历史补拉：每 %.0fs 对最近 %s 个会话回拉历史（只补历史=%s）",
-                             pull_seconds, self.cfg.get("history_pull_max_buyers") or 40,
-                             self.pddbridge_source.history_only)
+                    log.info("已开启 CDP 历史补拉：每 %.0fs 对最近 %s 个会话回拉历史",
+                             pull_seconds, self.cfg.get("history_pull_max_buyers") or 40)
                     threading.Thread(target=self._history_pull_loop,
                                      name="bridge-history-pull", daemon=True).start()
         command_thread = threading.Thread(
@@ -2014,17 +1376,32 @@ class BridgeAgent:
         last_hb = 0.0
         try:
             while not self._stop.is_set():
+                wakeup = getattr(self, "_events_wakeup", None)
+                if wakeup is not None:
+                    triggered = wakeup.wait(timeout=0.2)
+                    if triggered:
+                        wakeup.clear()
+                    if self._stop.is_set():
+                        break
+                    if triggered:
+                        self._schedule_event_flush()
+                else:
+                    self._stop.wait(0.2)
                 now = time.time()
                 if now - last_hb >= hb_every:
                     self._heartbeat()
-                    self._flush_events()
-                    self._drain_center_ws_results()
+                    self._schedule_event_flush()
                     last_hb = now
                 self._stop.wait(0.2)
         finally:
             self._stop.set()
             self.watcher.stop()
             command_thread.join(timeout=1.0)
+            self._upload_executor.shutdown(wait=False, cancel_futures=True)
+            try:
+                self.client.close()
+            except Exception:
+                pass
             log.info("桥接已停止")
 
     def stop(self) -> None:
@@ -2033,17 +1410,6 @@ class BridgeAgent:
             self.watcher.stop()
         except Exception:
             pass
-        channel = getattr(self, "center_ws", None)
-        if channel is not None:
-            try:
-                # 先把还没 ack 的事件排空再断连接，否则它们要等下一次启动才重投。
-                self._flush_events()
-            except Exception:
-                pass
-            try:
-                channel.stop()
-            except Exception:
-                pass
         if self.pddbridge_source is not None:
             try:
                 self.pddbridge_source.stop()
@@ -2056,7 +1422,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description="探域桥接客户端")
     parser.add_argument("--config", default="", help="bridge_config.json 路径")
-    parser.add_argument("--platform", default="", help="pdd | taobao")
+    parser.add_argument("--platform", default="", help="pdd")
     parser.add_argument("--init-config", action="store_true", help="生成示例配置后退出")
     parser.add_argument("--status", action="store_true", help="打印本机通道状态后退出")
     parser.add_argument("--dry-run", action="store_true", help="发送命令不调真实通道")

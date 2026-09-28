@@ -84,6 +84,7 @@
       <h1>聚合接待</h1>
       <span class="badge" id="countBadge">0</span>
       <span class="sub" id="statusLine">连接中…</span>
+      <span class="badge" id="wsStatus" title="消息上传通道">WS 检测中</span>
       <span style="flex:1"></span>
       <button class="ghost" id="btnRefresh" type="button">刷新</button>
       <button class="ghost" id="btnDebug" type="button">打开调试台</button>
@@ -143,7 +144,6 @@
           <div class="msg">${escapeHtml(it.last_text || '（无摘要）')}</div>
           ${it.handoff_reason ? `<div class="reason">原因：${escapeHtml(it.handoff_reason)}</div>` : ''}
           <div class="card-actions">${aiStateControl(it, idx)}</div>
-          <div class="meta" style="margin-top:8px;color:var(--brand)">点击 → 请求跳转官方会话（拼多多依赖探域工作台在线）</div>
         </article>
       `).join('');
       $('list').querySelectorAll('.card').forEach(card => {
@@ -161,7 +161,7 @@
     }
     function aiStateControl(it, idx){
       const state = String(it.ai_takeover_state || (it.shop_ai_takeover_enabled ? 'active' : 'shadow'));
-      if (state === 'shadow') return '<span class="ai-state-label" title="该店铺未开启 AI 自动接待，仅生成影子回复">AI影子中</span>';
+      if (state === 'shadow') return '';
       const enabled = state === 'active';
       const text = enabled ? 'AI接待中' : (state === 'handoff' ? 'AI已暂停' : 'AI已关闭');
       const title = enabled ? '点击关闭该会话 AI 接待' : '点击开启该会话 AI 接待';
@@ -177,25 +177,33 @@
         $('statusLine').textContent = '加载失败';
         if (String(e.message || '').includes('登录') || String(e.message || '').includes('401')) {
           sessionStorage.removeItem('rbacUserToken');
-          stopQueuePolling();
           showLogin(e.message);
         } else {
           toast(e.message || '加载失败');
         }
       }
     }
-    // 轮询要"登没登录都装上"。旧实现只在 ensureAuth() 成功的分支里 setInterval，
-    // 走登录框进来的话只有一次 loadQueue() —— 列表冻在登录那一刻的快照，
-    // 不人工点「刷新」就不动，看起来就像"新消息根本没来"。
-    let queueTimer = null;
-    function startQueuePolling(){
-      if (queueTimer !== null) return;              // 防重复安装
-      queueTimer = setInterval(loadQueue, 5000);
-    }
-    function stopQueuePolling(){
-      if (queueTimer === null) return;
-      clearInterval(queueTimer);
-      queueTimer = null;
+    async function loadWsStatus(){
+      const el = $('wsStatus');
+      try {
+        const data = await req('/api/status');
+        const ws = data.websocket || (data.bridge && data.bridge.websocket) || {};
+        if (ws.connected) {
+          el.textContent = 'WS 已连接';
+          el.style.background = '#14532d';
+          el.style.color = '#dcfce7';
+        } else if (ws.enabled) {
+          el.textContent = 'HTTP 兜底';
+          el.style.background = '#78350f';
+          el.style.color = '#fef3c7';
+        } else {
+          el.textContent = 'HTTP';
+          el.style.background = '#334155';
+          el.style.color = '#e2e8f0';
+        }
+      } catch (e) {
+        el.textContent = '状态未知';
+      }
     }
     async function jump(it){
       if (!it) return;
@@ -276,15 +284,14 @@
         sessionStorage.setItem('rbacUserToken', j.token || '');
         showApp();
         loadQueue();
-        startQueuePolling();      // 登录框进来也要开始轮询
+        loadWsStatus();
       } catch (e) {
         $('loginErr').textContent = e.message || '登录失败';
       }
     };
-    $('btnRefresh').onclick = () => loadQueue();
+    $('btnRefresh').onclick = () => { loadQueue(); loadWsStatus(); };
     $('btnLogout').onclick = () => {
       sessionStorage.removeItem('rbacUserToken');
-      stopQueuePolling();
       showLogin('已退出');
     };
     $('btnDebug').onclick = () => {
@@ -304,7 +311,9 @@
       } catch (_) {}
       if (await ensureAuth()) {
         loadQueue();
-        startQueuePolling();
+        loadWsStatus();
+        setInterval(loadQueue, 5000);
+        setInterval(loadWsStatus, 5000);
       }
     })();
   </script>

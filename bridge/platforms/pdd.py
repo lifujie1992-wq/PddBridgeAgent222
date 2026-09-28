@@ -43,18 +43,21 @@ class PddPlatform(PlatformBase):
         return pdd_parser.is_seller_failure_line(line)
 
     def channel_status(self, cfg: dict) -> Dict[str, Any]:
-        if self._cdp_active(cfg):
-            from ..pddbridge_source import channel_status_cdp
-
-            st = channel_status_cdp(cfg)
-            st["platform"] = self.name
-            return st
-        st = pdd_channel.channel_status(
+        native = pdd_channel.channel_status(
             configured_port=cfg.get("dll_port"),
             configured_pid=cfg.get("workbench_pid"),
         )
-        st["platform"] = self.name
-        return st
+        # Prefer the native sender when available. A configured log directory
+        # alone does not mean that sender exists on this computer.
+        if native.get("dll_ready") and (cfg.get("tanyu_log_dir") or not self._cdp_active(cfg)):
+            return {**native, "platform": self.name, "send_channel": "tanyu"}
+        if cfg.get("_pddbridge_source") is not None or self._cdp_active(cfg):
+            from ..pddbridge_source import channel_status_cdp
+
+            cdp = channel_status_cdp(cfg)
+            if cdp.get("send_ready") or self._cdp_active(cfg):
+                return {**cdp, "platform": self.name, "send_channel": "cdp"}
+        return {**native, "platform": self.name, "send_channel": "tanyu"}
 
     def open_chat(
         self,
@@ -89,10 +92,10 @@ class PddPlatform(PlatformBase):
         cfg: dict,
         dry_run: bool = False,
     ) -> dict:
-        # CDP is suitable for realtime intake, but its send receipt has proven
-        # unreliable on the local PDD workbench. Prefer Tanyu's sender whenever
-        # its log directory is configured, because it can verify delivery.
-        if self._cdp_active(cfg) and not cfg.get("tanyu_log_dir"):
+        # Select before attempting delivery; never retry an uncertain native
+        # send through another channel, which could send the reply twice.
+        channel = self.channel_status(cfg)
+        if channel.get("send_channel") == "cdp":
             from ..pddbridge_source import send_text_cdp
 
             return send_text_cdp(buyer_id, content, account, cfg=cfg, dry_run=dry_run)

@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 import urllib.error
 import urllib.parse
 import urllib.request
+import queue
 from typing import Any, Dict, List, Optional
 
 from . import __version__
@@ -28,6 +29,11 @@ class BridgeClient:
         agent_id: str,
         agent_name: str = "",
         device_id: str = "",
+        *,
+        websocket_enabled: bool = False,
+        websocket_url: str = "",
+        websocket_path: str = "/api/bridge/v1/ws",
+        websocket_max_inflight: int = 64,
     ):
         self.server_url = str(server_url or "").rstrip("/")
         self.agent_token = str(agent_token or "")
@@ -37,6 +43,45 @@ class BridgeClient:
         # 中心 /events 实测要 9–15s；旧值 15s 正好卡在超时线上，会反复超时重发。
         self.timeout = 30.0
         self._server_clock = None
+        self._websocket = None
+        self._ws_commands = queue.Queue(maxsize=2000)
+        if websocket_enabled:
+            from .ws_transport import WebSocketEventTransport
+            ws_url = str(websocket_url or self.server_url)
+            if websocket_url:
+                full_ws_url = ws_url.rstrip("/")
+            else:
+                full_ws_url = ws_url
+            if full_ws_url.startswith("https://"):
+                full_ws_url = "wss://" + full_ws_url[8:]
+            elif full_ws_url.startswith("http://"):
+                full_ws_url = "ws://" + full_ws_url[7:]
+            if websocket_url:
+                target = full_ws_url
+            else:
+                target = full_ws_url.rstrip("/") + "/" + str(websocket_path).lstrip("/")
+            self._websocket = WebSocketEventTransport(
+                target,
+                self.agent_token, self.agent_id, self.device_id,
+                timeout=self.timeout, max_inflight=websocket_max_inflight,
+                on_command=self._queue_ws_command,
+            )
+
+    def _queue_ws_command(self, command: dict) -> None:
+        try:
+            self._ws_commands.put_nowait(dict(command))
+        except queue.Full:
+            log = __import__("logging").getLogger("pdd.bridge")
+            log.error("websocket command queue full; command dropped id=%s",
+                      command.get("id") or command.get("command_id"))
+
+    def drain_ws_commands(self) -> List[dict]:
+        commands = []
+        while True:
+            try:
+                commands.append(self._ws_commands.get_nowait())
+            except queue.Empty:
+                return commands
 
     def server_now(self) -> float:
         if self._server_clock is None:
@@ -123,6 +168,14 @@ class BridgeClient:
         )
 
     def upload_events(self, events: List[dict]) -> dict:
+        if self._websocket is not None:
+            try:
+                return self._websocket.send_events(events)
+            except BridgeClientError as exc:
+                # Keep the existing HTTP endpoint as a live fallback while the
+                # center rolls out the WebSocket endpoint.
+                log = __import__("logging").getLogger("pdd.bridge")
+                log.warning("websocket upload failed, falling back to HTTP: %s", exc)
         return self._request(
             "POST",
             "/api/bridge/v1/events",
@@ -132,31 +185,36 @@ class BridgeClient:
             },
         )
 
+    def connect_websocket(self) -> None:
+        if self._websocket is not None:
+            self._websocket.connect()
+
+    def transport_status(self) -> dict:
+        if self._websocket is None:
+            return {"enabled": False, "connected": False, "transport": "http"}
+        return self._websocket.status()
+
+    def close(self) -> None:
+        if self._websocket is not None:
+            self._websocket.close()
+
     def pull_commands(self, *, wait_seconds: float = 0.0) -> List[dict]:
         wait_seconds = max(0.0, min(float(wait_seconds or 0.0), 25.0))
         q = urllib.parse.urlencode({
             "agent_id": self.agent_id,
             "wait_seconds": wait_seconds,
         })
-        # 超时必须跟着 wait_seconds 走，**不能**用 self.timeout（30s）兜底：
-        # 中心只要挂住不回，桥接就会卡满 30 秒，期间一次都不能再轮询，
-        # 新指令只能等这次请求结束才拿得到（实测 9.29 秒的"指令迟到"）。
-        # 宁可快速放弃这次请求、立刻重试，也不要堵住轮询循环。
-        poll_timeout = max(3.0, min(wait_seconds + 3.0, 15.0))
         payload = self._request(
             "GET",
             f"/api/bridge/v1/commands?{q}",
-            timeout=poll_timeout,
+            timeout=max(self.timeout, wait_seconds + 5.0),
         )
         commands = payload.get("commands") if isinstance(payload, dict) else None
         if not isinstance(commands, list):
             return []
         return [c for c in commands if isinstance(c, dict)]
 
-    def report_command_result(self, command_id: str, result: dict,
-                              timeout: Optional[float] = None) -> dict:
-        # 显式超时：不传就会落回 self.timeout=30s。这个调用在指令轮询周期的关键
-        # 路径上，挂满 30 秒会把下一轮取指令一起推迟（实测周期被拖到 9~10 秒）。
+    def report_command_result(self, command_id: str, result: dict) -> dict:
         return self._request(
             "POST",
             f"/api/bridge/v1/commands/{urllib.parse.quote(str(command_id))}/result",
@@ -164,5 +222,4 @@ class BridgeClient:
                 "agent_id": self.agent_id,
                 "result": result,
             },
-            timeout=timeout if timeout else 8.0,
         )

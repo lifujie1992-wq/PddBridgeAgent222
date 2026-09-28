@@ -3,7 +3,6 @@
 
 Default: customer-friendly GUI.
   python bridge/run.py              # 拼多多
-  python bridge/run.py --platform taobao
   python bridge/run.py --cli --status
 """
 from __future__ import annotations
@@ -22,20 +21,12 @@ def _extract_platform(args: list[str]) -> tuple[str, list[str]]:
         elif arg == "--platform" and i + 1 < len(args):
             plat = args[i + 1].strip()
             i += 1
-        elif arg in {"taobao", "qianniu", "pdd"}:
-            plat = "taobao" if arg in {"taobao", "qianniu"} else "pdd"
         else:
             cleaned.append(arg)
         i += 1
-    if not plat:
-        # Infer from executable name when frozen.
-        exe = (sys.executable if getattr(sys, "frozen", False) else "").lower()
-        if "qianniu" in exe or "taobao" in exe:
-            plat = "taobao"
-        else:
-            plat = "pdd"
-    if plat == "qianniu":
-        plat = "taobao"
+    # Only 拼多多 is supported; anything else falls back to it.
+    if plat != "pdd":
+        plat = "pdd"
     return plat, cleaned
 
 

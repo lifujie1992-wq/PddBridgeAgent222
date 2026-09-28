@@ -29,7 +29,6 @@ from bridge import __build_hash__ as BUILD_HASH
 from bridge import __version__ as VERSION
 from bridge.message_timing import TIMING_FIELDS, stamp_message, queue_metrics
 from bridge.event_queue import append_event
-from bridge.seat_scope import (SCOPE_BLOCK, SCOPE_UNKNOWN, SeatScope)
 log = logging.getLogger("pdd.local_first")
 _GATEWAY_PROCESS: subprocess.Popen | None = None
 _GATEWAY_PID: int | None = None
@@ -322,22 +321,6 @@ def _discover_pdd_shop_metadata(log_dir: str | Path) -> list[dict]:
     return list(shops.values())
 
 
-def _local_seat_accounts(agent) -> list:
-    """本机在线的席位账号 = CDP 会话的 account。
-
-    一个 CDP 会话 = 工作台的一个标签页 = `(店铺, 本机登录的那个席位)`。
-    取不到就返回空列表 —— SeatScope 会据此判成"未知"并 fail-open（不是沉默拦光）。
-    """
-    source = getattr(agent, "pddbridge_source", None)
-    sessions = list(getattr(source, "sessions", None) or [])
-    accounts = []
-    for session in sessions:
-        account = str(getattr(session, "account", "") or "").strip()
-        if account:
-            accounts.append(account)
-    return accounts
-
-
 def _event_from_message(agent, message: dict) -> dict:
     message = stamp_message(message)
     account = str(message.get("account") or "").strip()
@@ -406,7 +389,6 @@ def _message_with_local_context(agent, message: dict) -> dict:
         value for value in sorted(active)
         if str(platforms.get(value) or "").strip().lower() == platform
         or (platform == "pdd" and value.startswith("mall_"))
-        or (platform == "taobao" and value.startswith("tb_"))
     ]
     if len(candidates) != 1:
         return normalized
@@ -420,60 +402,6 @@ def _message_with_local_context(agent, message: dict) -> dict:
         normalized["account"] = account
         normalized["shop_id"] = shop_id
     return normalized
-
-
-def context_update_event(event: dict) -> dict:
-    """把事件 id 换成确定性的「上下文增强」id（按原始 event_id 派生）。"""
-    updated = dict(event)
-    original_id = str(event.get("event_id") or event.get("idempotency_key") or "")
-    update_id = "pdd-context-" + hashlib.sha256(original_id.encode("utf-8")).hexdigest()[:32]
-    updated["event_id"] = update_id
-    updated["idempotency_key"] = update_id
-    return updated
-
-
-def _shop_in_list(value, shop_id: str) -> bool:
-    """店铺 ID 是否在给定的字符串列表里（非列表 / 空值一律 False）。"""
-    if not shop_id or not isinstance(value, (list, tuple, set)):
-        return False
-    allowed = {str(item or "").strip() for item in value if str(item or "").strip()}
-    return shop_id in allowed
-
-
-def immediate_ingress_enabled(agent, account: str) -> bool:
-    """即时上传是否对这个店铺生效。
-
-    **owner 2026-09-21 明确决定「默认全开」**（不是仓库默认的 fail-closed
-    白名单）。为了仍然能一键 / 单店回退，判定顺序固定为：
-
-      1) `immediate_ingress_enabled = false`        -> 全关（回到改动前行为）
-      2) 店铺在 `immediate_ingress_disabled_shop_ids` -> 只关这个店
-      3) `immediate_ingress_shop_ids` 非空           -> 只有命中的店铺开（窄灰度）
-      4) 否则                                        -> 开
-    """
-    cfg = agent.cfg
-    if not bool(cfg.get("immediate_ingress_enabled", True)):
-        return False
-    shop_id = str(agent._account_shop_id(account) or "").strip()
-    if _shop_in_list(cfg.get("immediate_ingress_disabled_shop_ids"), shop_id):
-        return False
-    allowlist = cfg.get("immediate_ingress_shop_ids")
-    if isinstance(allowlist, (list, tuple, set)) and allowlist:
-        return _shop_in_list(allowlist, shop_id)
-    return True
-
-
-def enrichment_event(agent, event_id: str, enriched: dict) -> dict:
-    """按原始 event_id 生成**确定性**的上下文增强事件：重复补发也幂等。
-
-    中心按 `msg_id` 判重，只有首次插入才会入队 AI 任务；所以这条增强事件
-    只会把订单上下文补进已有消息，不会二次回复。
-    """
-    update_id = context_update_event({"event_id": event_id})["event_id"]
-    event = _event_from_message(agent, enriched)
-    event["event_id"] = update_id
-    event["idempotency_key"] = update_id
-    return event
 
 
 def install_local_first() -> None:
@@ -501,28 +429,13 @@ def install_local_first() -> None:
             )
         )
 
-    def enqueue_center_event(agent, event: dict) -> bool:
-        """把补充事件写入中心待发队列：持久化 + 去重 + 唤醒上传线程。"""
-        event = agent._ensure_event_id(event)
-        event_id = str(event.get("event_id") or "")
-        if not event_id:
-            return False
-        with agent._pending_lock:
-            if not hasattr(agent, "_pending_ids"):
-                agent._pending_ids = {e["event_id"] for e in agent._pending}
-            if event_id in agent._pending_ids:
-                return False
-            try:
-                agent._append_local_queue(event)
-            except OSError as exc:
-                agent._last_error = f"append_local_queue: {exc}"
-                return False
-            agent._pending.append(event)
-            agent._pending_ids.add(event_id)
-        agent._ledger_note(event_id, "captured_context_update", event=event)
-        ensure_upload_worker(agent)
-        agent._immediate_upload_event.set()
-        return True
+    def context_update_event(event: dict) -> dict:
+        updated = dict(event)
+        original_id = str(event.get("event_id") or event.get("idempotency_key") or "")
+        update_id = "pdd-context-" + hashlib.sha256(original_id.encode("utf-8")).hexdigest()[:32]
+        updated["event_id"] = update_id
+        updated["idempotency_key"] = update_id
+        return updated
 
     def replace_pending_event(self, event_id: str, enriched_message: dict) -> bool:
         replacement = _event_from_message(self, enriched_message)
@@ -619,12 +532,8 @@ def install_local_first() -> None:
                     else:
                         note("failed", str(lookup.get("error") or "lookup_failed"))
                     if replaced and bool(self.cfg.get("dual_write_local_workbench", True)):
-                        self._local_delivery.enqueue(enrichment_event(self, event_id, enriched))
-                    if immediate_ingress_enabled(self, str(message.get("account") or "")):
-                        # 灰度：原始消息早已上传；这里按同一个 msg_id 补发一条
-                        # 上下文增强事件（新 event_id）。大脑按 msg_id 判为 duplicate
-                        # 并合并订单上下文，只有首次插入才会入队 AI 任务，不会二次回复。
-                        enqueue_center_event(self, enrichment_event(self, event_id, enriched))
+                        rich_event = context_update_event(_event_from_message(self, enriched))
+                        self._local_delivery.enqueue(rich_event)
                 except Exception:
                     note("failed", "context_commit_error")
                     fallback = dict(message)
@@ -644,6 +553,7 @@ def install_local_first() -> None:
                     self._pdd_context_queue.task_done()
                     ensure_upload_worker(self)
                     self._immediate_upload_event.set()
+                    self._schedule_event_flush()
 
         for index in range(context_workers):
             threading.Thread(
@@ -660,9 +570,9 @@ def install_local_first() -> None:
         self._immediate_upload_lock = threading.Lock()
         # 并发上传池：中心实测支持同一工位并发请求，多批同时在飞可把突发吞吐提升数倍
         try:
-            workers = int(self.cfg.get("upload_concurrency") or 6)
+            workers = int(self.cfg.get("upload_concurrency") or 16)
         except (TypeError, ValueError):
-            workers = 6
+            workers = 3
         self._upload_workers = max(1, min(workers, 8))
         self._upload_pool = ThreadPoolExecutor(
             max_workers=self._upload_workers, thread_name_prefix="bridge-upload")
@@ -680,12 +590,6 @@ def install_local_first() -> None:
     def init(self, *args, **kwargs) -> None:
         original_init(self, *args, **kwargs)
         self._pdd_system_filtered_events = 0
-        # 不串台：只处理"本机工作台实际登录的席位"的消息。
-        # 判断依据 = CDP 会话的 account（一个会话 = 工作台的一个标签页 =
-        # 一个店铺 + 本机登录的那个席位）。详见 bridge/seat_scope.py 的文件头。
-        self._seat_scope = SeatScope(self.cfg, accounts_provider=lambda: _local_seat_accounts(self))
-        self._out_of_scope_archived = 0
-        self._seat_scope_unknown_warned_at = 0.0
         from bridge.parser import configure_parser_profile
 
         config_path = Path(str(self.cfg.get("config_path") or _root() / "bridge_config.json")).resolve()
@@ -752,8 +656,10 @@ def install_local_first() -> None:
 
     def flush_events(self) -> None:
         ensure_upload_worker(self)
-        if not self._immediate_upload_lock.acquire(blocking=False):
-            return
+        # Multiple wrapper calls may run concurrently. The base uploader claims
+        # event ids under _pending_lock before network I/O, so overlapping drain
+        # loops cannot upload the same event. Serializing this entire function
+        # made every later live message wait for the previous slow /events call.
         try:
             with self._pending_lock:
                 center_pending = {
@@ -811,9 +717,9 @@ def install_local_first() -> None:
                         # 宽限期内，旧实现在这里无限循环等待，实测突发时中心 46s 一条都发不出去。
                         try:
                             max_wait = max(0.0, float(
-                                self.cfg.get("local_first_max_wait_seconds") or 0.3))
+                                self.cfg.get("local_first_max_wait_seconds") or 1.0))
                         except (TypeError, ValueError):
-                            max_wait = 0.3
+                            max_wait = 1.0
                         wait = min(max(0.0, min(blocked_until) - now), max_wait)
                         if wait > 0:
                             self._stop.wait(wait)
@@ -849,21 +755,13 @@ def install_local_first() -> None:
                     if event_id in remaining
                 }
         finally:
-            self._immediate_upload_lock.release()
+            pass
 
     def on_local_event(self, message: dict) -> None:
         from bridge.parser import is_pdd_system_message
         if is_pdd_system_message(message):
             self._pdd_system_filtered_events += 1
             return
-        # 归属闸门必须放在 _message_with_local_context **之前**：那个函数会给
-        # "认不出归属"的消息硬塞一个本机账号，判定放在它后面等于什么都能过。
-        verdict = self._seat_scope.allows(message.get("account"), message.get("role"))
-        if verdict == SCOPE_BLOCK:
-            self._archive_out_of_scope(message)
-            return
-        if verdict == SCOPE_UNKNOWN:
-            self._warn_seat_scope_unknown()
         message = stamp_message(_message_with_local_context(self, message))
         event = _event_from_message(self, message)
         local_enabled = bool(self.cfg.get("dual_write_local_workbench", True))
@@ -875,24 +773,14 @@ def install_local_first() -> None:
                     self._local_first_deadlines[event_id] = time.monotonic() + 1.0
         lookup_required = needs_order_context(message)
         event_id = str(event.get("event_id") or event.get("idempotency_key") or "")
-        # 灰度：命中店铺时订单上下文查询与上传并行，消息不再被扣在队列里。
-        # 未命中（默认）走原来的门控路径，行为与改动前完全一致。
-        ingress_immediate = bool(
-            event_id and immediate_ingress_enabled(self, str(message.get("account") or ""))
-        )
         if lookup_required and event_id:
             ensure_context_worker(self)
             with self._pdd_context_gate_lock:
-                already_pending = event_id in self._pdd_context_pending_ids
-                if ingress_immediate:
-                    # 不进 blocked 集合：flush_events 不会拦它，原始消息立即上传。
-                    self._pdd_context_pending_ids.discard(event_id)
-                    self._pdd_context_deadlines.pop(event_id, None)
-                elif not already_pending:
+                if event_id in self._pdd_context_pending_ids:
+                    lookup_required = False
+                else:
                     self._pdd_context_pending_ids.add(event_id)
                     self._pdd_context_deadlines[event_id] = time.monotonic() + self._pdd_context_gate_seconds
-            if already_pending and not ingress_immediate:
-                lookup_required = False
         original_on_local_event(self, message)
         if lookup_required and event_id:
             self._pdd_context_queue.put((event_id, message))
@@ -900,48 +788,6 @@ def install_local_first() -> None:
             self._local_delivery.wakeup.set()
         ensure_upload_worker(self)
         self._immediate_upload_event.set()
-
-    def _archive_out_of_scope(self, message: dict) -> None:
-        """拦下的消息**本地留档**（老板拍板：不推浮窗、不上报，但要留一份）。
-
-        留档的意义：过滤规则万一误杀，还能从这里找回来。没有这一步，
-        误杀就是静默丢失 —— 那比串台严重得多。
-        """
-        try:
-            path = Path(str(self.cfg.get("local_queue_path") or "bridge_queue_pdd.jsonl"))
-            out = path.with_name(path.stem + "_out_of_scope" + (path.suffix or ".jsonl"))
-            row = {
-                "at": time.time(),
-                "account": str(message.get("account") or ""),
-                "buyer_id": str(message.get("buyer_id") or ""),
-                "role": str(message.get("role") or ""),
-                "content": str(message.get("content") or "")[:500],
-                "msg_id": str(message.get("msg_id") or ""),
-                "ts": message.get("ts"),
-                "source": str(message.get("source") or ""),
-                "filter_reason": self._seat_scope.stats.get("last_blocked") or "out_of_scope",
-                "detail": "不是本机席位（本机席位见 status().seat_scope.seats）",
-            }
-            with out.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            self._out_of_scope_archived += 1
-        except Exception as exc:                      # 留档失败绝不能打挂主链路
-            log.debug("out_of_scope 留档失败: %s", exc)
-
-    def _warn_seat_scope_unknown(self) -> None:
-        """席位集合探测不到时**大声告警**（fail-open 但必须让人看见）。
-
-        退回到"可能串台"是可以接受的；静默地不告警不行 —— 那会让人误以为
-        过滤在工作，实际一条都没拦。
-        """
-        now = time.time()
-        if now - getattr(self, "_seat_scope_unknown_warned_at", 0.0) < 60.0:
-            return
-        self._seat_scope_unknown_warned_at = now
-        log.warning(
-            "本机席位集合探测不到（工作台没开 / CDP 挂了）—— 串台过滤**未生效**，"
-            "当前放行全部消息。要恢复过滤请打开工作台标签页，或在配置里填 "
-            "allowed_seat_accounts。")
 
     def status_payload(self) -> dict:
         from bridge.parser import parser_profile_status
@@ -952,10 +798,6 @@ def install_local_first() -> None:
         payload["local_first"] = True
         payload["local_delivery"] = self._local_delivery.status()
         payload["pdd_system_filtered_events"] = self._pdd_system_filtered_events
-        payload["out_of_scope_archived"] = getattr(self, "_out_of_scope_archived", 0)
-        scope = getattr(self, "_seat_scope", None)
-        if scope is not None:
-            payload["seat_scope"] = scope.status()
         payload["parser_profile"] = parser_profile_status()
         context_gate_lock = getattr(self, "_pdd_context_gate_lock", None)
         if context_gate_lock is None:
@@ -973,10 +815,6 @@ def install_local_first() -> None:
     agent_class._flush_events = flush_events
     agent_class._on_local_event = on_local_event
     agent_class._status_payload = status_payload
-    # 这两个也必须挂上去：它们定义在 install_local_first() 内部，
-    # 不挂的话 on_local_event 一调用就 AttributeError。
-    agent_class._archive_out_of_scope = _archive_out_of_scope
-    agent_class._warn_seat_scope_unknown = _warn_seat_scope_unknown
     agent_class._local_first_v0512 = True
     bridge.__version__ = VERSION
     agent_module.__version__ = VERSION
@@ -991,15 +829,15 @@ def _root() -> Path:
 def _adsorb_auto_start_enabled(root: Path | None = None) -> bool:
     config_path = (root or _root()) / "pdd_adsorb_config.json"
     if not config_path.is_file():
-        return False
+        return True
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         log.warning("ignoring invalid adsorb config %s: %s", config_path, exc)
-        return False
+        return True
     if not isinstance(payload, dict):
-        return False
-    return payload.get("auto_start_with_bridge", False) is True
+        return True
+    return payload.get("auto_start_with_bridge", True) is not False
 
 
 def _running_adsorb_pid(root: Path, executable: Path) -> int | None:
@@ -1043,21 +881,13 @@ def start_adsorb_window(root: Path | None = None) -> bool:
 
 
 def stop_started_adsorb_window(root: Path | None = None) -> None:
-    """Stop only the dock instance started by this bridge process."""
+    """Stop the installation's dock, including adopted or reawakened instances."""
     global _ADSORB_PROCESS_PID
     with _ADSORB_STOP_LOCK:
-        started_pid = _ADSORB_PROCESS_PID
         _ADSORB_PROCESS_PID = None
-        if not started_pid:
-            return
         bundle_root = (root or _root()).resolve()
         executable = bundle_root / "PddAdsorbWindow.exe"
-        deadline = time.monotonic() + 2.0
-        running_pid = _running_adsorb_pid(bundle_root, executable)
-        while running_pid is None and time.monotonic() < deadline:
-            time.sleep(0.05)
-            running_pid = _running_adsorb_pid(bundle_root, executable)
-        if running_pid != started_pid or not executable.is_file():
+        if not executable.is_file():
             return
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
@@ -1068,10 +898,13 @@ def stop_started_adsorb_window(root: Path | None = None) -> None:
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            stopper.wait(timeout=10.0)
-            log.info("PDD adsorb window stopped pid=%s", started_pid)
+            result = stopper.wait(timeout=15.0)
+            if result == 0:
+                log.info("PDD adsorb installation cleanup completed root=%s", bundle_root)
+            else:
+                log.warning("PDD adsorb cleanup incomplete root=%s exit=%s", bundle_root, result)
         except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("failed to stop PDD adsorb window pid=%s: %s", started_pid, exc)
+            log.warning("failed to stop PDD adsorb installation root=%s: %s", bundle_root, exc)
 
 
 def _load_raw_config(path: Path) -> dict[str, Any]:
@@ -1293,9 +1126,9 @@ def start_local_gateway() -> None:
     if not gateway.is_file():
         raise RuntimeError(f"LocalSeatGateway.exe not found: {gateway}")
 
-    # Port 18766 remains reserved for Qianniu on dual-client machines. Legacy
-    # PDD configs are migrated to a dedicated loopback port without touching
-    # the bridge token, device id, durable queues, or shop settings.
+    # 18766 is a legacy port. Old PDD configs are migrated to a dedicated
+    # loopback port without touching the bridge token, device id, durable
+    # queues, or shop settings.
     first_port = 18767 if requested_port == 18766 else requested_port
     candidate_ports = [first_port, *[value for value in range(18767, 18777) if value != first_port]]
     port = 0
