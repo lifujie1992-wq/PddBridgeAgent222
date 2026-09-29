@@ -4,16 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 from .pdd import PddPlatform
-from .taobao import TaobaoPlatform
 
 _REGISTRY = {
     "pdd": PddPlatform,
     "cnpdd": PddPlatform,
-    "taobao": TaobaoPlatform,
-    "tb": TaobaoPlatform,
-    "qn": TaobaoPlatform,
-    "qianniu": TaobaoPlatform,
-    "cntaobao": TaobaoPlatform,
 }
 
 

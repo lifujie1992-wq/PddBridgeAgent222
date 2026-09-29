@@ -192,10 +192,10 @@
     .platform.platform-unknown { background: #94a3b8; }
     .preview { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .right-col { text-align: right; min-width: 38px; }
-    .time { font-size: 10px; color: var(--sub); margin: 2px 0 7px; }
+    .time { font-size: 10px; color: var(--sub); margin: 2px 0 7px; height: 18px; line-height: 18px; box-sizing: border-box; white-space: nowrap; }
     .badge { display: inline-flex; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 10px; align-items: center; justify-content: center; }
     /* 回复倒计时 / 超时等待（仿拼多多官方 180 秒）*/
-    .wait-tag { display: inline-block; margin: 0 0 6px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; white-space: nowrap; }
+    .wait-tag { display: block; width: max-content; margin: 2px 0 7px auto; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 16px; white-space: nowrap; }
     .wait-tag.countdown { background: #fff7ed; color: #b45309; border: 1px solid #fed7aa; }
     .wait-tag.overdue { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
     .sess.overdue-row { background: linear-gradient(90deg, #fef2f2 0%, #fff 48%); }
@@ -485,7 +485,7 @@
         <a class="capacity-link" href="capacity.html" title="打开容量监控">容量监控</a>
       </div>
       <div class="brain-controls">
-        <span class="mode-safety" id="brainSafety">● 探域生产 · 自有大脑影子验证</span>
+        <span class="mode-safety" id="brainSafety">● 观察模式 · 消息仅用于验证</span>
         <button class="brain-btn" id="btnBrainTakeover" type="button">开启 AI 回复</button>
         <button class="brain-btn danger hidden" id="btnBrainSendToggle" type="button">停止全部 AI 回复</button>
       </div>
@@ -543,7 +543,7 @@
             <section class="conversation-panel" aria-label="对话记录">
               <div class="messages" id="messages"><div class="empty">从左侧选择会话后，消息会显示在这里</div></div>
               <div class="composer">
-                <div class="composer-note"><span class="safe-note" id="safeNote">● 观察模式：模拟买家咨询 → 自动跑影子AI（不真实发送）</span><span>Ctrl+Enter</span></div>
+                <div class="composer-note"><span class="safe-note" id="safeNote">● 观察模式：模拟买家咨询 → 自动生成验证回复（不真实发送）</span><span>Ctrl+Enter</span></div>
                 <div class="composer-quick" id="consultQuick" aria-label="常用咨询">
                   <button type="button" class="chip" data-consult="这个包邮吗">包邮吗</button>
                   <button type="button" class="chip" data-consult="续航多久">续航多久</button>
@@ -639,6 +639,7 @@
 
     <div class="statusbar">
       <span id="watchStatus"><span class="dot off"></span>监听中</span>
+      <span id="wsStatus" title="消息上传通道">WS -</span>
       <span id="portStatus">DLL -</span>
       <span id="sessCount">0 会话</span>
       <span id="authUserLabel" style="margin-left:auto;color:var(--muted);font-size:11px"></span>
@@ -2567,7 +2568,7 @@
 
 • 这是人工真实发送，不是模拟咨询
 • 开启后30分钟自动关闭，后端重启也会关闭
-• 这不会切换大脑，也不会自动关闭探域回复
+• 这不会切换大脑，也不会自动发送给买家
 • 每条发送前仍会再次确认
 
 请确认当前店铺不会与其他客服或机器人重复回复。`
@@ -2732,11 +2733,17 @@
       const anyOutboundArmed = takeover || manualArmedShopCount > 0;
       const channel = st.pdd_send_channel || {};
       const sendReady = !!st.real_send_ready;
+      const activeChannel = channel.online ? channel : st;
+      const channelIsCdp = activeChannel.send_channel === 'cdp' || /^cdp/.test(String(activeChannel.port_discovery || ''));
+      const channelName = channelIsCdp ? 'CDP' : 'DLL';
       const safety = $('brainSafety');
       if (safety) {
         safety.textContent = takeover
-          ? (sendReady ? `● LIVE：AI 回复将直接发送给买家 · ${armedShopCount} 家店铺 · Windows Bridge/DLL 已就绪` : `● LIVE 已开启，但发送通道异常 · ${channel.online ? (channel.dry_run ? 'Windows Bridge 为 dry-run' : 'Windows DLL 未就绪') : 'Windows Bridge 离线'}`)
+          ? (sendReady ? `● LIVE：AI 回复将直接发送给买家 · ${armedShopCount} 家店铺 · ${channelName} 发送通道已就绪` : `● LIVE 已开启，但发送通道异常 · ${channel.online ? (channel.dry_run ? 'Windows Bridge 为 dry-run' : 'Windows DLL 未就绪') : 'Windows Bridge 离线'}`)
           : (manualArmedShopCount > 0 ? `● SHADOW：AI 不自动发送 · ${manualArmedShopCount} 家店铺允许人工发送` : '● SHADOW：AI 仅生成草稿，不向买家发送');
+        if (st.local_first && st.local_remote_error) {
+          safety.textContent += ` · 大脑回复同步失败：${st.local_remote_error}`;
+        }
         safety.classList.toggle('takeover', takeover && sendReady);
       }
       const sendToggle = $('btnBrainSendToggle');
@@ -2768,16 +2775,20 @@
       $('watchStatus').innerHTML = st.watching
         ? '<span class="dot on"></span>监听中'
         : '<span class="dot off"></span>未监听';
-      const shadow = st.shadow || {};
-      const shadowText = shadow.running ? '影子AI生成中' : (shadow.enabled ? '影子AI已启用' : '影子AI手动模式');
-      const dllLabel = st.dll_port
-        ? `DLL ${st.dll_port}`
-        : `DLL 未就绪${st.port_discovery ? '(' + st.port_discovery + ')' : ''}`;
+      const ws = st.websocket || (st.bridge && st.bridge.websocket) || {};
+      const wsStatus = $('wsStatus');
+      if (wsStatus) {
+        wsStatus.textContent = ws.connected ? 'WS 已连接' : (ws.enabled ? 'HTTP 兜底' : 'HTTP');
+        wsStatus.title = ws.connected ? 'WebSocket 消息通道已连接' : 'WebSocket 不可用，当前使用 HTTP';
+      }
+      const dllLabel = sendReady
+        ? `${channelName} 已就绪${activeChannel.dll_port ? ' ' + activeChannel.dll_port : ''}`
+        : `发送通道未就绪${activeChannel.port_discovery ? '(' + activeChannel.port_discovery + ')' : ''}`;
       $('portStatus').textContent = takeover
         ? (legacyTakeover ? `旧版全局接管发送中 · ${dllLabel}` : `我的模型发送中 · ${armedShopCount}家店铺 · ${dllLabel}`)
         : (manualArmedShopCount > 0
           ? `人工直发已授权 · ${manualArmedShopCount}家店铺 · ${dllLabel}`
-          : (ownBrainShops.length ? `我的模型待命 · 我方不发送 · ${dllLabel}` : `探域回复 · ${shadowText} · 我方不发送 · ${dllLabel}`));
+          : (ownBrainShops.length ? `我的模型待命 · 我方不发送 · ${dllLabel}` : `我方不发送 · ${dllLabel}`));
       $('sessCount').textContent = `${st.session_count || 0} 会话`;
       $('titleSub').textContent = $('body').dataset.space === 'capabilities'
         ? '能力中心 · 安全验证'
@@ -2804,7 +2815,7 @@
           ? `● 人工直发已开启：${manualArmedShopCount} 家店铺临时授权；每条回复仍需二次确认，可用顶部按钮立即全部停止`
           : (ownBrainShops.length
             ? '● 部分店铺已选择我的模型，但当前没有店铺获得运行时发送授权'
-            : '● 各店铺默认由探域回复；我的模型只做影子验证，不会自动发送给买家'));
+            : '● 当前为观察模式，不会自动发送给买家'));
       $('safeNote').classList.toggle('live', anyOutboundArmed);
       syncManualSendUI();
       // names may have arrived; refresh list labels without full data change
@@ -2852,6 +2863,7 @@
       const signature = JSON.stringify(next.map(s => [
         s.buyer_id || '', s.account || '', s.nickname || '', s.display_last_content || s.last_content || '',
         s.last_role || '', s.last_ts || 0, s.unread || 0, s.msg_count || 0,
+        s.waiting_for_reply, s.waiting_since || 0,
         s.handoff ? 1 : 0, s.handoff_reason || '', s.shop_id || '', s.shop_name || '',
         s.ai_takeover_state || '', s.ai_takeover_enabled ? 1 : 0,
         s.shop_ai_takeover_enabled ? 1 : 0, s.ai_takeover_override,
@@ -2953,11 +2965,11 @@
     const REPLY_LIMIT_SECONDS = 180;   // 拼多多官方要求 180 秒内回复客户
     function waitInfo(session, nowMs) {
       if (!session) return null;
-      if (String(session.last_role || '') !== 'user') return null;   // 最后一条不是买家 → 已回复
-      const ts = Number(session.last_ts || 0);
+      const hasWaitState = typeof session.waiting_for_reply === 'boolean';
+      if (hasWaitState ? !session.waiting_for_reply : String(session.last_role || '') !== 'user') return null;
+      const ts = Number(hasWaitState ? session.waiting_since : session.last_ts || 0);
       if (!ts) return null;
-      const age = (nowMs || Date.now()) / 1000 - ts;
-      if (age < 0) return null;
+      const age = Math.max(0, (nowMs || Date.now()) / 1000 - ts);
       if (age < REPLY_LIMIT_SECONDS) {
         return { cls: 'countdown', text: '剩 ' + Math.ceil(REPLY_LIMIT_SECONDS - age) + 's',
                  title: '官方要求 ' + REPLY_LIMIT_SECONDS + ' 秒内回复' };
@@ -2972,8 +2984,14 @@
         const info = waitInfo({ last_role: el.dataset.lastRole || '',
                                 last_ts: Number(el.dataset.lastTs || 0) }, now);
         const row = el.closest('.sess');
-        if (!info) { el.remove(); if (row) row.classList.remove('overdue-row'); return; }
-        el.className = 'wait-tag ' + info.cls;
+        if (!info) {
+          el.className = 'time';
+          el.textContent = fmtTime(Number(el.dataset.messageTs || 0));
+          el.title = '';
+          if (row) row.classList.remove('overdue-row');
+          return;
+        }
+        el.className = 'time wait-tag ' + info.cls;
         el.textContent = info.text;
         el.title = info.title;
         if (row) row.classList.toggle('overdue-row', info.cls === 'overdue');
@@ -3008,6 +3026,8 @@
       let list = sessionsCache.slice();
       if (filterMode === 'handoff') list = list.filter(s => !!s.handoff);
       if (shopFilterId) list = list.filter(s => (s.shop_id || shopIdFromAccount(s.account)) === shopFilterId);
+      list.sort((a, b) => Number(!!b.handoff) - Number(!!a.handoff)
+        || Number(b.last_ts || 0) - Number(a.last_ts || 0));
       // Search is server-side: message IDs are intentionally absent from list summaries.
       updateFilterTabCounts();
       const countLabel = $('listCountLabel');
@@ -3028,16 +3048,14 @@
         return;
       }
       // 不做店铺分组：一行一个会话，按探域左侧布局
-      const shopKeys = new Set(list.map(s => String(s.shop_id || shopIdFromAccount(s.account) || '')));
-      const multiShop = shopKeys.size > 1;   // 多店铺时在名字后补店铺后缀，便于区分同一买家的多行
       const parts = [];
       list.forEach(s => {
           const active = currentBuyer === s.buyer_id && (currentAccount || '') === (s.account || '') ? 'active' : '';
           const handoffMeta = handoffPresentation(s);
           const wait = waitInfo(s, Date.now());
-          const waitTag = wait
-            ? `<div class="wait-tag ${wait.cls}" data-last-role="user" data-last-ts="${Number(s.last_ts || 0)}" title="${escapeHtml(wait.title)}">${escapeHtml(wait.text)}</div>`
-            : '';
+          const timeTag = wait
+            ? `<div class="time wait-tag ${wait.cls}" data-last-role="user" data-last-ts="${Number(s.waiting_since || s.last_ts || 0)}" data-message-ts="${Number(s.last_ts || 0)}" title="${escapeHtml(wait.title)}">${escapeHtml(wait.text)}</div>`
+            : `<div class="time">${fmtTime(s.last_ts)}</div>`;
           // Keep the preview useful in the narrow dock: a long workstation name
           // must not consume the message preview.
           const who = lastSpeaker(s);
@@ -3057,14 +3075,13 @@
           <div class="mid">
             <div class="name-row">
               <span class="${pb.cls}" title="${escapeHtml(pb.label)}">${escapeHtml(pb.text)}</span>
-              <div class="name">${escapeHtml(s.nickname || s.buyer_id)}${multiShop ? `<span class="shop-suffix" title="${escapeHtml(shopDisplayName(s))}"> · ${escapeHtml(shortShopName(s))}</span>` : ''}</div>
+              <div class="name" title="${escapeHtml(shopDisplayName(s))} · ${escapeHtml(s.nickname || s.buyer_id)}">${escapeHtml(shortShopName(s))}<span class="shop-suffix"> · ${escapeHtml(s.nickname || s.buyer_id)}</span></div>
               ${handoffTag}
             </div>
             <div class="preview"><span class="who ${who.cls}" title="${escapeHtml(who.title)}">${who.text}</span>${escapeHtml(s.display_last_content || s.last_content || '')}</div>
           </div>
           <div class="right-col">
-            <div class="time">${fmtTime(s.last_ts)}</div>
-            ${waitTag}
+            ${timeTag}
             ${aiStateControl}
           </div>
         </div>`);

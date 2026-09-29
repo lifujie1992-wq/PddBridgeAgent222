@@ -141,9 +141,7 @@ class BridgeHub:
     @staticmethod
     def _normalize_platform(platform: str) -> str:
         value = str(platform or "").strip().lower()
-        if value in {"qianniu", "tb"}:
-            return "taobao"
-        return value if value in {"pdd", "taobao"} else ""
+        return value if value == "pdd" else ""
 
     @classmethod
     def _legacy_channel_principal(cls, token: str, platform: str) -> str:
@@ -158,7 +156,7 @@ class BridgeHub:
     @classmethod
     def _legacy_principal_platform(cls, token: str, agent_id: str) -> str:
         claimed = str(agent_id or "").strip()
-        for platform in ("pdd", "taobao"):
+        for platform in ("pdd",):
             if claimed == cls._legacy_channel_principal(token, platform):
                 return platform
         return ""
@@ -193,11 +191,10 @@ class BridgeHub:
                 return principal
 
             # A legacy token is an authentication credential, not a channel
-            # identity. One Windows seat may legitimately run PDD and Taobao
-            # bridges with that same credential. Keep the first channel on the
-            # historical principal and assign a deterministic principal to any
-            # additional platform so their heartbeat and command state cannot
-            # overwrite or consume each other.
+            # identity. Keep the first channel on the historical principal and
+            # assign a deterministic principal to any additional platform so
+            # their heartbeat and command state cannot overwrite or consume
+            # each other.
             principal = self._legacy_principal(token)
             claimed_platform = self._legacy_principal_platform(token, claimed_agent_id)
             platform = platform_hint or claimed_platform
@@ -430,6 +427,7 @@ class BridgeHub:
                         "account": cmd["account"],
                         "content": cmd.get("content") or "",
                         "meta": cmd.get("meta") or {},
+                        "lease_token": cmd.get("lease_token") or "",
                     }
                 )
             if agent_id in self.agents:

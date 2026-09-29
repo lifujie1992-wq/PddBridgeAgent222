@@ -27,29 +27,6 @@ APP_TITLE = "拼多多聚合接待"
 DEFAULT_PORTS = tuple(range(18767, 18777))
 DEFAULT_TARGET_NAMES = {"pddworkbench.exe", "pddwebworkbench.exe"}
 
-# Chrome is preferred over Edge. Measured on a real 工位 (2026-09-22): merely
-# having an Edge window on screen made Explorer re-extract every desktop icon
-# continuously (~4x/second, whole icon column rewriting itself), i.e. the whole
-# desktop flashing while the dock was up. Same flags, same URL, same fresh
-# profile in Chrome: zero repaints. Edge is kept as a fallback because it ships
-# with Windows and most machines only have that one.
-BROWSER_CANDIDATES: tuple[tuple[str, str], ...] = (
-    ("chrome.exe", r"Google\Chrome\Application\chrome.exe"),
-    ("msedge.exe", r"Microsoft\Edge\Application\msedge.exe"),
-)
-BROWSER_NAMES = {name for name, _ in BROWSER_CANDIDATES}
-
-# 随包分发的 Chromium 放在安装目录下这些位置（相对 ROOT）。留空目录即可启用，
-# 顺序即优先级。ungoogled-chromium / Chromium 官方快照解压后都是 chrome.exe。
-BUNDLED_BROWSER_CANDIDATES: tuple[str, ...] = (
-    r"chromium\chrome.exe",
-    r"chromium\chromium.exe",
-    r"browser\chrome.exe",
-)
-
-# 系统浏览器的探测根目录（环境变量名，Windows 上这几个总是有）。
-SYSTEM_BROWSER_ROOTS: tuple[str, ...] = ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
-
 
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -59,6 +36,7 @@ def app_root() -> Path:
 
 ROOT = app_root()
 STATE_DIR = ROOT / "state"
+PROFILE_DIR = STATE_DIR / "pdd-adsorb-edge-profile"
 PID_PATH = STATE_DIR / "pdd-adsorb.pid"
 LOG_PATH = ROOT / "logs" / "pdd_adsorb.log"
 CONTROL_PATH = ROOT / "data" / "pdd_adsorb_control.json"
@@ -182,7 +160,7 @@ def select_target_window(
         process = processes.get(item.pid, ProcessInfo("", ""))
         name = process.name.lower()
         path = process.path.lower()
-        if name in BROWSER_NAMES or name in {"aliworkbench.exe", "pddadsorbwindow.exe"}:
+        if name in {"aliworkbench.exe", "msedge.exe", "pddadsorbwindow.exe"}:
             continue
         exact_process = name in names
         pdd_process = "pdd" in name or "pdd" in path
@@ -248,8 +226,6 @@ class Win32:
     user32.IsWindowVisible.restype = wintypes.BOOL
     user32.IsIconic.argtypes = (wintypes.HWND,)
     user32.IsIconic.restype = wintypes.BOOL
-    user32.IsWindow.argtypes = (wintypes.HWND,)
-    user32.IsWindow.restype = wintypes.BOOL
     user32.GetForegroundWindow.argtypes = ()
     user32.GetForegroundWindow.restype = wintypes.HWND
     user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
@@ -363,9 +339,6 @@ def load_config() -> dict[str, Any]:
         "poll_interval_seconds": 0.6,
         "auto_start_bridge": True,
         "hide_when_inactive": False,
-        # 留空 = 自动探测，顺序：安装目录自带 chromium/chrome.exe → 系统 Chrome → Edge。
-        # 也可写死某个浏览器的完整路径。
-        "browser_path": "",
         "target_process_names": sorted(DEFAULT_TARGET_NAMES),
         "target_title_keywords": ["拼多多", "接待中心", "商家工作台"],
     }
@@ -463,74 +436,42 @@ def start_bridge_if_needed(config: dict[str, Any]) -> bool:
     return True
 
 
-def find_browser(config: dict[str, Any] | None = None) -> Path:
-    """Resolve the browser that hosts the dock.
-
-    顺序：browser_path 显式配置 → 安装目录自带的 Chromium → 系统 Chrome → Edge。
-    「自带优先」是有意的：带了自己的浏览器就应该用它，客户机装没装、装的是
-    哪个版本都不影响。自带浏览器放进 <安装目录>/chromium/chrome.exe 即可，
-    不需要为此重新构建 exe。
-    """
-    configured = str((config or {}).get("browser_path") or "").strip().strip('"')
-    if configured:
-        explicit = Path(configured)
-        if explicit.is_file():
-            return explicit
-        log(f"configured browser_path not found: {configured}")
-    for relative in BUNDLED_BROWSER_CANDIDATES:
-        candidate = ROOT / relative
+def find_edge() -> Path:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
+    ]
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
-    for name, relative in BROWSER_CANDIDATES:
-        for env_name in SYSTEM_BROWSER_ROOTS:
-            root = os.environ.get(env_name, "").strip()
-            if not root:
-                continue
-            candidate = Path(root) / relative
-            if candidate.is_file():
-                return candidate
-    raise FileNotFoundError("未找到浏览器：安装目录没有自带 Chromium，本机也没装 Chrome 或 Edge。")
+    raise FileNotFoundError("未找到 Microsoft Edge，请先安装或修复 Edge。")
 
 
-_BROWSER: Path | None = None
-
-
-def browser_path() -> Path:
-    """The browser this process runs the dock with, resolved once."""
-    global _BROWSER
-    if _BROWSER is None:
-        _BROWSER = find_browser(load_config())
-    return _BROWSER
-
-
-def profile_dir() -> Path:
-    """One profile per browser: Edge and Chrome must not share a profile dir."""
-    try:
-        stem = browser_path().stem.lower()
-    except FileNotFoundError:
-        # --stop / --wake must still work on a machine where the browser was
-        # uninstalled; the process scan below picks up whatever is still live.
-        stem = "browser"
-    return STATE_DIR / f"pdd-adsorb-{stem}-profile"
-
-
-def profile_browser_processes(profile: Path) -> list[psutil.Process]:
+def profile_edge_processes(profile: Path) -> list[psutil.Process]:
     expected = str(profile.resolve()).lower()
     result: list[psutil.Process] = []
     for process in psutil.process_iter(["name", "cmdline"]):
         try:
-            if str(process.info.get("name") or "").lower() not in BROWSER_NAMES:
+            if str(process.info.get("name") or "").lower() != "msedge.exe":
                 continue
-            command = " ".join(process.info.get("cmdline") or []).lower()
-            if "--user-data-dir" in command and expected in command:
-                result.append(process)
+            args = process.info.get("cmdline") or []
+            for index, arg in enumerate(args):
+                flag, separator, value = str(arg).partition("=")
+                if flag.lower() != "--user-data-dir":
+                    continue
+                if not separator:
+                    value = str(args[index + 1]) if index + 1 < len(args) else ""
+                if value and str(Path(value.strip('"')).resolve()).lower() == expected:
+                    result.append(process)
+                    break
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
     return result
 
 
-def stop_profile_browser(profile: Path, timeout: float = 2.5) -> None:
-    processes = profile_browser_processes(profile)
+def stop_profile_edge(profile: Path, timeout: float = 2.5) -> None:
+    processes = profile_edge_processes(profile)
     for process in reversed(processes):
         try:
             process.terminate()
@@ -546,26 +487,25 @@ def stop_profile_browser(profile: Path, timeout: float = 2.5) -> None:
         psutil.wait_procs(alive, timeout=timeout)
 
 
-def stop_all_adsorb_browsers(timeout: float = 2.5) -> None:
-    """停掉本产品所有浮窗浏览器，包括其他安装根目录留下的残留窗口。
+def stop_all_adsorb_edge(timeout: float = 2.5) -> None:
+    """停掉本产品所有浮窗 Edge，包括其他安装根目录留下的残留窗口。
 
-    每个安装根目录有自己的 profile 目录，只停自己的 profile 会漏掉
-    升级/重装前旧实例拉起的窗口，于是同一个网关出现两个一模一样的浮窗。
-    目录名历史上叫过 pdd-adsorb-edge-profile，现在是 pdd-adsorb-<浏览器>-profile，
-    按前缀+后缀匹配，两种都认得。"""
-    profiles: set[Path] = {profile_dir()}
+    每个安装根目录有自己的 profile 目录，只停自己的 PROFILE_DIR 会漏掉
+    升级/重装前旧实例拉起的窗口，于是同一个网关出现两个一模一样的浮窗。"""
+    profiles: set[Path] = {PROFILE_DIR}
     for process in psutil.process_iter(["name", "cmdline"]):
         try:
-            if str(process.info.get("name") or "").lower() not in BROWSER_NAMES:
+            if str(process.info.get("name") or "").lower() != "msedge.exe":
                 continue
             for arg in process.info.get("cmdline") or []:
-                value = str(arg).split("=", 1)[-1].strip().strip('"').lower()
-                if "pdd-adsorb-" in value and value.endswith("-profile"):
-                    profiles.add(Path(str(arg).split("=", 1)[-1].strip().strip('"')))
+                if "pdd-adsorb-edge-profile" in str(arg).lower():
+                    value = str(arg).split("=", 1)[-1].strip().strip('"')
+                    if value:
+                        profiles.add(Path(value))
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
     for profile in profiles:
-        stop_profile_browser(profile, timeout)
+        stop_profile_edge(profile, timeout)
 
 
 def trim_profile_cache(profile: Path) -> None:
@@ -613,22 +553,47 @@ def running_controller_pid() -> int | None:
     return None
 
 
+def installation_controllers() -> list[psutil.Process]:
+    """Find controllers by exact installation path; a stale PID is insufficient."""
+    result = []
+    for process in psutil.process_iter(["exe", "cmdline"]):
+        try:
+            if process.pid == os.getpid():
+                continue
+            args = [str(arg) for arg in (process.info.get("cmdline") or [])]
+            if "--stop" in args or "--diagnose" in args:
+                continue
+            if getattr(sys, "frozen", False):
+                owned = str(Path(process.info.get("exe") or "").resolve()).casefold() == str(Path(sys.executable).resolve()).casefold()
+            else:
+                owned = any(str(Path(arg).resolve()).casefold() == str(Path(__file__).resolve()).casefold()
+                            for arg in args[1:] if arg.lower().endswith(".py"))
+            if owned:
+                result.append(process)
+        except (OSError, ValueError, psutil.Error):
+            continue
+    return result
+
+
 def stop_existing() -> int:
     stopped = 0
-    pid = running_controller_pid()
-    if pid and pid != os.getpid():
+    controllers = installation_controllers()
+    for process in controllers:
         try:
-            process = psutil.Process(pid)
             process.terminate()
-            try:
-                process.wait(timeout=3.0)
-            except psutil.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2.0)
             stopped += 1
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        except psutil.Error:
             pass
-    stop_all_adsorb_browsers()
+    _, alive = psutil.wait_procs(controllers, timeout=3.0)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.Error:
+            pass
+    if alive:
+        psutil.wait_procs(alive, timeout=2.0)
+    # Only this installation's dedicated browser profile is ours to close.
+    stop_profile_edge(PROFILE_DIR)
     try:
         PID_PATH.unlink()
     except FileNotFoundError:
@@ -646,10 +611,6 @@ class DockedWindow:
         self._dock_visible = False
         self._dock_rect: Rect | None = None
         self._dock_pin_on: bool | None = None
-        self.target_hwnd = 0
-        self._target_rescan_at = 0.0
-        self._edge_pids: set[int] = set()
-        self._edge_pids_at = 0.0
         self._process_cache: dict[int, ProcessInfo] = {}
         self._process_cache_at = 0.0
 
@@ -686,71 +647,36 @@ class DockedWindow:
     def edge_pids(self) -> set[int]:
         # Edge may hand the --app window to another process using the same
         # user-data-dir. That process is not always a child of Popen's PID.
-        # Walking every process' command line is expensive, and each poll asked
-        # for this twice (dock lookup + black-host hiding); a short cache keeps
-        # the steady-state loop cheap.
-        now = time.monotonic()
-        if now - self._edge_pids_at < 2.0:
-            return set(self._edge_pids)
-        result = {process.pid for process in profile_browser_processes(profile_dir())}
-        if self.edge is not None:
-            result.add(int(self.edge.pid))
-            try:
-                result.update(child.pid for child in psutil.Process(self.edge.pid).children(recursive=True))
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
-                pass
-        self._edge_pids = result
-        self._edge_pids_at = now
-        return set(result)
-
-    def target_from_hwnd(self) -> WindowInfo | None:
-        """Track the workbench window without re-scanning the whole desktop."""
-        hwnd = self.target_hwnd
-        if not hwnd or not Win32.user32.IsWindow(hwnd):
-            return None
-        rect = wintypes.RECT()
-        if not Win32.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return None
-        process_id = wintypes.DWORD()
-        Win32.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-        return WindowInfo(
-            hwnd=hwnd,
-            pid=int(process_id.value),
-            title="",
-            class_name="",
-            rect=Rect(rect.left, rect.top, rect.right, rect.bottom),
-            visible=bool(Win32.user32.IsWindowVisible(hwnd)),
-            minimized=bool(Win32.user32.IsIconic(hwnd)),
-        )
+        result = {process.pid for process in profile_edge_processes(PROFILE_DIR)}
+        if self.edge is None:
+            return result
+        result.add(int(self.edge.pid))
+        try:
+            result.update(child.pid for child in psutil.Process(self.edge.pid).children(recursive=True))
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            pass
+        return result
 
     def launch(self, base: str, initial: Rect) -> None:
-        browser = browser_path()
-        profile = profile_dir()
-        profile.mkdir(parents=True, exist_ok=True)
-        # Do not tear down an existing profile browser process while opening the
-        # dock.  Killing and recreating the app window makes Explorer repaint
-        # the desktop icons; explicit --stop still performs full cleanup.
-        trim_profile_cache(profile)
+        edge = find_edge()
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        stop_all_adsorb_edge()
+        trim_profile_cache(PROFILE_DIR)
         # Use the complete workbench's dock layout so the standalone window has
         # the same session filters, search, badges and jump behavior as the
         # embedded workbench.
         url = base + "/?dock=1&standalone=1"
         self.edge = subprocess.Popen(
             [
-                str(browser),
+                str(edge),
                 f"--app={url}",
-                f"--user-data-dir={profile}",
+                f"--user-data-dir={PROFILE_DIR}",
                 "--no-first-run",
                 "--disable-default-apps",
                 "--disable-sync",
                 "--disable-background-mode",
                 "--disable-background-networking",
                 "--disable-component-update",
-                # The standalone dock is a small always-on-top surface. GPU
-                # compositing can make Explorer's desktop surface flicker on
-                # some driver combinations; keep this window software rendered
-                # without changing the user's normal browser settings.
-                "--disable-gpu",
                 "--disk-cache-size=52428800",
                 "--media-cache-size=10485760",
                 f"--window-position={initial.left},{initial.top}",
@@ -759,7 +685,7 @@ class DockedWindow:
             cwd=str(ROOT),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        log(f"launched {browser.name} app {url}")
+        log(f"launched Edge app {url}")
 
     def find_dock_window(self, windows: list[WindowInfo]) -> WindowInfo | None:
         return select_dock_window(windows, self.edge_pids())
@@ -801,17 +727,10 @@ class DockedWindow:
             )
         self._dock_visible = visible
 
-    def apply_window_state(self, dock: WindowInfo | None, desired: Rect, control: dict[str, bool]) -> None:
+    def apply_window_state(self, dock: WindowInfo, desired: Rect, control: dict[str, bool]) -> None:
         pin_on = bool(control.get("pin", True))
         adsorb_on = bool(control.get("adsorb", True))
-        # Deliberately compare against the last *requested* rect, not against
-        # the dock's live rect. A window manager is free to report a rect that
-        # never equals the requested one (frame insets, enforced minimum
-        # sizes), and comparing with the live rect then re-issues SetWindowPos
-        # on every single poll — which is what makes the desktop repaint under
-        # an always-on-top window. `dock` is accepted for callers/tests but the
-        # live rect is not part of the decision.
-        should_move = adsorb_on and desired != self._dock_rect
+        should_move = adsorb_on and (dock.rect != desired or desired != self._dock_rect)
         pin_changed = pin_on != self._dock_pin_on
         if not should_move and not pin_changed:
             return
@@ -836,8 +755,8 @@ class DockedWindow:
             return
         if self.dock_hwnd:
             Win32.user32.PostMessageW(self.dock_hwnd, Win32.WM_CLOSE, 0, 0)
-        stop_profile_browser(profile_dir())
-        trim_profile_cache(profile_dir())
+        stop_profile_edge(PROFILE_DIR)
+        trim_profile_cache(PROFILE_DIR)
         self.edge = None
 
     def run(self) -> int:
@@ -857,29 +776,18 @@ class DockedWindow:
 
         windows = Win32.windows()
         target = self.target(windows)
-        if target is not None:
-            self.target_hwnd = target.hwnd
         work_area = Win32.work_area(target.hwnd if target else None)
         initial = choose_dock_rect(target.rect, work_area, width) if target else choose_fallback_rect(work_area, width)
         self.launch(base, initial)
 
         dock_seen = False
-        target_seen = target is not None
         dock_missing_since = 0.0
         dock_deadline = time.monotonic() + 45.0
+        target_seen = target is not None
         while not self.stop_event.is_set():
-            # Full desktop enumeration exists only to *resolve* HWNDs: it makes
-            # every top-level window in the system answer a cross-process
-            # WM_GETTEXT. Once both HWNDs are known, IsWindow/GetWindowRect keep
-            # tracking them at a fraction of the cost. Do not put a scan back
-            # into the steady state.
-            dock = None
-            if self.dock_hwnd and Win32.user32.IsWindow(self.dock_hwnd):
-                dock_seen = True
-                dock_missing_since = 0.0
-            else:
-                windows = Win32.windows()
-                dock = self.find_dock_window(windows)
+            windows = Win32.windows()
+            target = self.target(windows)
+            dock = self.find_dock_window(windows)
             if dock:
                 if dock.hwnd != self.dock_hwnd:
                     self._dock_rect = None
@@ -888,8 +796,6 @@ class DockedWindow:
                 dock_seen = True
                 dock_missing_since = 0.0
                 self.hide_black_host_windows(windows)
-            elif self.dock_hwnd and Win32.user32.IsWindow(self.dock_hwnd):
-                pass  # still tracking a live dock; nothing to re-resolve
             else:
                 self.dock_hwnd = 0
                 self._dock_visible = False
@@ -899,29 +805,19 @@ class DockedWindow:
                     if time.monotonic() - dock_missing_since >= 1.0:
                         return 0
                 elif time.monotonic() >= dock_deadline:
-                    raise RuntimeError("独立吸附窗口启动失败，未找到浏览器应用窗口。")
+                    raise RuntimeError("独立吸附窗口启动失败，未找到 Edge 应用窗口。")
                 self.stop_event.wait(poll_delay)
                 continue
 
-            target = self.target_from_hwnd()
-            if target is None and time.monotonic() >= self._target_rescan_at:
-                # Workbench window closed or re-created: re-resolve it, but not
-                # on every poll while it stays away.
-                self._target_rescan_at = time.monotonic() + 3.0
-                windows = Win32.windows()
-                target = self.target(windows)
-                if target is not None:
-                    self.target_hwnd = target.hwnd
-            if target is not None:
+            if target:
                 target_seen = True
-
-            # Only ask for a new position while there is a live, restored
-            # workbench window to adsorb against. A minimized workbench reports
-            # its off-screen system rect, and moving the dock out there (then
-            # hiding it) is pure churn.
-            if target is not None and not target.minimized:
+            if target:
                 desired = choose_dock_rect(target.rect, Win32.work_area(target.hwnd), width)
-                self.apply_window_state(dock, desired, load_dock_control())
+            else:
+                desired = choose_fallback_rect(Win32.work_area(), width)
+            # Keep the dock aligned while adsorption is enabled. Pin state is
+            # independent and can switch between TOPMOST and NOTOPMOST.
+            self.apply_window_state(dock, desired, load_dock_control())
 
             visible = not (target_seen and (target is None or target.minimized))
             if wake_pending():
@@ -930,7 +826,6 @@ class DockedWindow:
                 foreground = Win32.foreground_pid()
                 visible = foreground in self.edge_pids() | {target.pid}
             self.set_visible(visible)
-
             self.stop_event.wait(poll_delay)
         return 0
 
@@ -946,13 +841,8 @@ def diagnose(config: dict[str, Any]) -> int:
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
     target = select_target_window(rows, processes)
-    try:
-        browser = str(browser_path())
-    except FileNotFoundError as exc:
-        browser = f"<{exc}>"
     result = {
         "workbench": discover_workbench(config),
-        "browser": browser,
         "target": None if target is None else {
             "pid": target.pid,
             "title": target.title,
@@ -977,12 +867,12 @@ def wake_dock() -> int:
     for a short grace period so the controller poll does not re-hide it."""
     request_wake()
     windows = Win32.windows()
-    edge_pids = {p.pid for p in profile_browser_processes(profile_dir())}
+    edge_pids = {p.pid for p in profile_edge_processes(PROFILE_DIR)}
     dock = select_dock_window(windows, edge_pids) if edge_pids else None
     if dock is not None:
         if Win32.user32.IsIconic(dock.hwnd):
             Win32.user32.ShowWindow(dock.hwnd, Win32.SW_RESTORE)
-        elif not Win32.user32.IsWindowVisible(dock.hwnd):
+        else:
             Win32.user32.ShowWindow(dock.hwnd, Win32.SW_SHOW)
         log("dock woke by request")
         return 0
@@ -1004,7 +894,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.stop:
         stop_existing()
-        return 0
+        return 1 if installation_controllers() or profile_edge_processes(PROFILE_DIR) else 0
     config = load_config()
     if args.wake:
         return wake_dock()

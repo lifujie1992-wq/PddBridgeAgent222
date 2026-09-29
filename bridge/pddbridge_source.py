@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .parser import _canonical_account
+from .parser import ACCOUNT_RE, _canonical_account
 from .pddbridge import cdp as pdd_cdp
 from .pddbridge.protocol import buyer_message, buyer_uid, messages_from_list, parse_frame, seller_id
 
@@ -37,17 +37,6 @@ LISTENING = "listening"
 INJECT_RESOURCE = "bridge/pddbridge/inject.js"
 
 _DRAIN_BATCH = 800   # 单次取帧上限：小批量 eval 不会超时，且 peek 不删数据
-
-# 按 msg_id 判重窗口的**下限**。真正的窗口见 PddbridgeSource._dedup_window ——
-# 它必须比"同一条消息被重新报出来的最长间隔"更长，否则去重形同虚设。
-_DEDUP_WINDOW_SECONDS = 120.0
-# 自动窗口 = 历史补拉间隔 × 这个倍数。实测补拉每 ~243s 就把同一批消息重报一遍
-# （history_pull_seconds=120，但一个买家要好几轮才轮到一次），所以倍数不能太小：
-# 原来写死 120s < 243s，窗口**每次都在重报之前就过期**，于是 21 个 event_id
-# 被重复入队 84 次，还吃满 10 秒的 ack 超时。
-_DEDUP_WINDOW_PULL_FACTOR = 5.0
-_DEDUP_PRUNE_INTERVAL_SECONDS = 60.0
-_DEDUP_PRUNE_THRESHOLD = 4096   # 表小于这个规模就不扫，避免白花时间
 
 # 取帧时一并回传注入存活状态与注入层计数。
 # 优先用无损接口 peek（只读不删，Python 侧处理成功后再调 ack 删除）；
@@ -121,13 +110,8 @@ def _seat_uid(seller) -> str:
 class _Session:
     """一个页面上下文 = 一个账号/店铺的实时通道（多店铺就是多个会话）。"""
 
-    # 少了 socket_state 会让 _health_check 的赋值抛 AttributeError，而 except 分支里
-    # 又赋同一个属性、再次抛出 -> 异常逃出 _health_check -> pddbridge-cdp 守护线程在
-    # 第一次健康检查（默认 5s，_last_health 初值 0 所以是第一轮）就静默退出：
-    # state 仍是 listening、status() 仍报 ready，但再也收不到任何消息。
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
-                 "last_health", "push_ok", "frames", "socket_state",
-                 "last_frame_at", "attached_at", "fail_streak", "last_drain_at")
+                 "last_health", "push_ok", "frames", "socket_state", "send_capable")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -140,10 +124,8 @@ class _Session:
         self.last_health = 0.0
         self.push_ok = False
         self.frames = 0
-        self.last_frame_at = 0.0     # 最近一次收到帧的时间（静默检测用）
-        self.attached_at = time.time()   # 本次挂载时间：静默检测的起点
-        self.fail_streak = 0         # 连续 drain 失败次数（到阈值才丢弃该会话）
-        self.last_drain_at = 0.0     # 上次成功 drain 的时间（按需轮询的判据之一）
+        self.socket_state = "unknown"
+        self.send_capable = False
 
     def key(self) -> str:
         # 多个 middle_panel 目标可能共用同一个 executionContextId 和 URL（实测 7 个目标
@@ -284,7 +266,6 @@ class PddbridgeSource:
 
         self._seen: dict = {}    # (kind,msg_id)->ts 去重
         self._seen_any: dict = {}  # msg_id->ts 跨帧去重（push 与 send_message 互去）
-        self._last_dedup_prune = 0.0
         self._pending_sends: dict = {}  # "uid|content前48" -> 记录
         self._act: list = []
         self._lock = threading.Lock()
@@ -293,39 +274,6 @@ class PddbridgeSource:
         self._thread = None
         self._last_health = 0.0
         self._fallback_done = False
-        # 只补历史时按需轮询用：最近一次发起 pull_history 的时刻（见 _run 的 LISTENING 段）
-        self._last_pull_at = 0.0
-        # 单轮 drain 的断点。预算跑满就从这里接着轮，否则排在后面的店铺永远轮不到
-        # （每轮都从 sessions[0] 开始 = 尾部会话被饿死）。
-        self._pump_cursor = 0
-        # 轮转诊断。判断"预算调得对不对"要靠这两个数：
-        #   round_budget_hit 持续涨 = 一轮轮不完所有店铺 → 预算太小 / 某个 tab 太慢
-        #   round_full_turns 涨     = 每轮都能轮完全部店铺 → 预算够用
-        self._pump_stats = {"round_budget_hit": 0, "round_full_turns": 0}
-
-        def _num(key, default, low, high):
-            try:
-                value = float(self.cfg.get(key) or default)
-            except (TypeError, ValueError):
-                value = float(default)
-            return max(low, min(value, high))
-
-        # 单会话一次 eval 的超时预算（原来吃的是 8s 的连接超时，一次求值能阻塞 8 秒）
-        self._eval_timeout = _num("cdp_eval_timeout", 4.0, 0.5, 30.0)
-        # 单轮 drain 总预算：跑满就停手，下一轮从 _pump_cursor 接着轮
-        self._round_budget = _num("cdp_round_budget_seconds", 6.0, 0.2, 120.0)
-        self._fail_limit = int(_num("cdp_session_fail_limit", 3, 1, 20))
-        # 只补历史时的空转间隔（没有 pull 在飞时用这个）
-        self._idle_poll = _num("history_only_idle_poll_seconds", 5.0, 0.2, 120.0)
-        # pull_history 发起后按快节奏 drain 收应答的窗口
-        self._pull_window = _num("pull_drain_window_seconds", 6.0, 0.0, 120.0)
-        self._poll = _num("cdp_poll_interval", 0.2, 0.02, 60.0)
-        # 判重窗口。必须比"同一条消息被重报的最长间隔"长 —— 那个间隔由历史补拉的
-        # 节奏决定（见 _DEDUP_WINDOW_PULL_FACTOR 的注释）。配 dedup_window_seconds
-        # 可显式指定，0 = 按补拉间隔自动推导。
-        pull_seconds = _num("history_pull_seconds", 0.0, 0.0, 86400.0)
-        auto_window = max(_DEDUP_WINDOW_SECONDS, pull_seconds * _DEDUP_WINDOW_PULL_FACTOR)
-        self._dedup_window = _num("dedup_window_seconds", auto_window, 30.0, 86400.0)
         # 降级不永久化: CDP 修好后（比如重装了正确版本的 PDD 工作台）自动切回。
         # 旧行为是降级后线程直接退出, 客户机只能重启/重装桥接才能恢复 —— 现场高频事故。
         self.on_recover = on_recover
@@ -354,23 +302,18 @@ class PddbridgeSource:
             "push_retry": 0,          # 推送失败后补进缓冲
             "push_unknown_session": 0,  # 推送帧的会话 id 认不出
             "push_overload": 0,       # 推送队列满
+            "spill": 0,               # localStorage spill 写入的帧数
+            "spill_replayed": 0,      # localStorage spill 重放的帧数
             "context_unattached": 0,  # 发现上下文但注入失败（该店铺收不到消息）
             "dedup_py": 0,            # Python 侧判重命中（同一条只报一次）
             "unparsed_frame": 0,      # 只有 report_all=false 时才会计数
             "frame_error": 0,         # 帧处理异常
-            "spill": 0,               # 注入层缓冲溢出后落 localStorage 的条数
-            "spill_replayed": 0,      # 页面加载时从 localStorage 回放的条数
         }
-        self._js_stats: dict = {}   # 会话 key -> {注入层计数名: 上次值}（见 _note_js_stats）
+        self._js_stats: dict = {}
         self._warn_at: dict = {}
         # 全部上报: 除「按平台 msg_id 去重」以外不再丢弃任何帧, 回不回由中心(大脑)决定。
         self.report_all = bool(self.cfg.get("report_all", True))
         self.dedup_off = str(self.cfg.get("dedup_mode") or "platform_id").strip().lower() == "off"
-        # 「只补历史」：主数据源不是 CDP 时（例如 tanyu_logs + 周期补拉），这个源
-        # 只负责回拉历史，不上报实时帧。否则同一条消息会被探域日志和 CDP 各收一遍，
-        # 上传两遍（实测 10/32 的 event_id 被上传了多次）。会话挂载与 pull_history
-        # 完全不受影响——pull_history 的应答走 list 帧，那种帧照常放行。
-        self.history_only = bool(self.cfg.get("_history_only", False))
         self.reported: dict = {
             "no_buyer": 0,           # 取不到买家 uid: 照报, 带原因
             "seat_uid_as_buyer": 0,  # 帧里只带席位一端: 照报, 带原因
@@ -413,18 +356,11 @@ class PddbridgeSource:
         # 探针/转发配置必须在注入完成后下发（管道由 DLL 创建）; 失败自动重试
         if native_recv and self._native_recv is not None:
             self._apply_native_recv_config()
-        # 只补历史时不打推送服务器：这个源不上报实时帧，页面直推没有意义，
-        # 只会白白多开一个端口、并让页面为每一帧多发一次 POST。
-        # 关掉后帧进缓冲、由 drain 轮询取走——而 list 帧（历史补拉的应答）本来
-        # 也必须走 drain，所以历史通道不受影响。
-        if self._push.port is None and not self.history_only:
+        if self._push.port is None:
             try:
                 log.info("pddbridge 推送通道监听 127.0.0.1:%s", self._push.start())
             except Exception as exc:
                 log.warning("推送通道启动失败, 全走 drain 轮询: %s", exc)
-        log.info("pddbridge 判重窗口 %.0fs（历史补拉间隔 %.0fs；窗口必须更长，"
-                 "否则同一条消息会被反复上报）",
-                 self._dedup_window, float(self.cfg.get("history_pull_seconds") or 0))
         self._thread = threading.Thread(target=self._run, daemon=True, name="pddbridge-cdp")
         self._thread.start()
         return self
@@ -456,6 +392,7 @@ class PddbridgeSource:
             "state": self.state,
             "port": self.sessions[0].port if self.sessions else None,
             "injected": bool(self.sessions),
+            "send_ready": self.state == LISTENING and any(s.send_capable for s in self.sessions),
             "msg_count": self.msg_count,
             "send_count": self.send_count,
             "sessions": [
@@ -471,17 +408,6 @@ class PddbridgeSource:
             "dedup_mode": "off" if self.dedup_off else "platform_id",
             "reported": dict(self.reported),
             "drops": dict(self.drops),
-            "history_only": self.history_only,
-            # 轮转健康度：budget_hit 一直涨说明一轮轮不完所有店铺（10 店铺场景要盯这个）
-            "pump": dict(self._pump_stats,
-                         interval=round(self._round_interval(), 3),
-                         eval_timeout=self._eval_timeout,
-                         round_budget=self._round_budget,
-                         sessions=len(self.sessions),
-                         fail_streak=[s.fail_streak for s in self.sessions]),
-            # 判重窗口必须长于消息被重报的间隔，否则同一条消息会反复入队。
-            # 这两个数放在一起就能一眼看出有没有配歪。
-            "dedup_window_seconds": round(self._dedup_window, 1),
         }
 
     def diagnostics(self) -> dict:
@@ -522,7 +448,6 @@ class PddbridgeSource:
             self._act.append(("pull_history",
                               (str(uid), str(account or ""), page, str(begin_msg_id or 0),
                                int(start_index or 0), str(pre_msg_id or 0), event)))
-            self._wake.set()   # 主循环可能正睡在 idle 间隔上（默认 5s），必须叫醒
         event.wait(timeout)
         if event.result is None:
             return {"ok": False, "status": "timeout", "via": "cdp_history",
@@ -541,7 +466,6 @@ class PddbridgeSource:
         event.deadline = time.monotonic() + timeout
         with self._lock:
             self._act.append(("send", (str(uid), str(content), str(account or ""), event, timeout, csid)))
-            self._wake.set()   # 同上：别让发送在唤醒间隔上白等
         event.wait(timeout)
         if event.result is None:
             key = "%s|%s" % (str(uid), str(content)[:48])
@@ -563,7 +487,6 @@ class PddbridgeSource:
     def reconnect(self) -> None:
         with self._lock:
             self._act.append(("reconnect", ()))
-            self._wake.set()
 
     # ---------------- 事件/状态 ----------------
     def _emit(self, msg: dict) -> None:
@@ -598,7 +521,7 @@ class PddbridgeSource:
         lossless=True 表示用了 peek（未删数据），调用方处理完必须 _ack；
         旧注入脚本无 peek 时返回 False，行为同旧版（先清后传，CDP 失败即丢）。
         """
-        r = session.cdp.eval(_DRAIN_EXPR, session.cid, timeout=self._eval_timeout)
+        r = session.cdp.eval(_DRAIN_EXPR, session.cid)
         if r is None:
             raise RuntimeError("cdp eval 无响应(连接断开/超时)")
         if not isinstance(r, dict):
@@ -615,20 +538,12 @@ class PddbridgeSource:
         if count <= 0:
             return
         try:
-            session.cdp.eval(_ACK_EXPR % int(count), session.cid, timeout=self._eval_timeout)
+            session.cdp.eval(_ACK_EXPR % int(count), session.cid)
         except Exception as exc:
             log.debug("drain ack 失败(下轮会重取): %s", exc)
 
     def _note_js_stats(self, stats: dict, session: _Session | None = None) -> None:
-        """把注入层自己记的计数搬到 Python 侧并告警（JS 溢出/推送失败/误丢原来是静默的）。
-
-        计数是**每个页面各自**累计的，所以基准值也必须按会话分开记。共用一份时两个店铺
-        会互相覆盖对方的 previous：A 报 358 → 记 358；B 报 332 → 覆盖成 332；下一轮 A
-        又报 358 → 判定 +26 → 每秒复读同一条告警（实测就是这样，看着像计数在涨，
-        其实每页的值恒定）。
-        """
-        scope = session.key() if session is not None else ""
-        seen = self._js_stats.setdefault(scope, {})
+        """把注入层自己记的计数搬到 Python 侧并告警（JS 溢出/推送失败/误丢原来是静默的）。"""
         for key, field in (("overflow_drop", "buf_overflow"), ("dedup_skip", "js_would_drop"),
                            ("exact_repeat", "js_exact_repeat"),
                            ("push_skip", "push_skip"), ("push_retry", "push_retry"),
@@ -637,12 +552,9 @@ class PddbridgeSource:
                 value = int(stats.get(key) or 0)
             except (TypeError, ValueError):
                 continue
-            previous = seen.get(key, 0)
+            previous = self._js_stats.get(key, 0)
             if value > previous:
-                # 这里跑在 _drain 内、被 _pump_session 的 except 罩着：字段名对不上
-                # 会连带把整个 session 当故障丢掉，且 spill 计数永远清不掉，形成
-                # attach→drop→rescan 死循环。所以宁可少记一个计数也不能抛。
-                self.drops[field] = int(self.drops.get(field) or 0) + (value - previous)
+                self.drops[field] += value - previous
                 if field == "js_would_drop":
                     log.warning(
                         "pddbridge 页面里的旧版注入包装本会误丢 %d 条消息（已拦下）；"
@@ -653,7 +565,7 @@ class PddbridgeSource:
                     log.info("pddbridge 注入层看到字节完全相同的重复帧 +%d（未丢）", value - previous)
                 else:
                     log.warning("pddbridge 注入层计数 %s +%d (累计 %d)", key, value - previous, value)
-            seen[key] = value
+            self._js_stats[key] = value
         if session is not None:
             try:
                 if int(stats.get("pushed") or 0) > 0:
@@ -668,25 +580,12 @@ class PddbridgeSource:
             log.warning(message)
 
     def _pump_session(self, session: _Session) -> str:
-        """LISTENING 单轮: 取帧 + 判活。返回 ok | lost | error | fail。
-
-        error 与 fail 的区别是**要不要摘掉这个会话**。原实现一次 eval 失败就丢会话，
-        页面偶发卡一下（GC、切标签、渲染阻塞）就会被误判成注入丢失，把好好的店铺
-        整个摘下来，要等下一轮重扫（默认 20s）才挂回去 —— 这 20 秒该店铺静默丢消息。
-        """
+        """LISTENING 单轮: 取帧 + 判活。返回 ok | lost | error。"""
         try:
             frames, hooked, lossless = self._drain(session)
         except Exception as exc:
-            session.fail_streak += 1
-            if session.fail_streak >= self._fail_limit:
-                log.warning("cdp drain 连续 %d 次失败 -> 丢弃该会话 (%s): %s",
-                            session.fail_streak, session.label(), exc)
-                return "fail"
-            log.info("cdp drain 第 %d/%d 次失败, 下一轮重试 (%s): %s",
-                     session.fail_streak, self._fail_limit, session.label(), exc)
+            log.warning("cdp drain error -> 重扫 (%s): %s", session.label(), exc)
             return "error"
-        session.fail_streak = 0
-        session.last_drain_at = time.time()
         if not hooked:
             self.drops["hook_lost"] += 1
             log.warning("pddbridge 注入丢失(页面重载/换页) -> 重新注入 %s", session.label())
@@ -717,13 +616,18 @@ class PddbridgeSource:
         prelude = (
             "window.__pddBridge_push_url = %r;\n"
             "window.__pddBridge_session = %r;\n"
-        ) % (self._push_url(), "%s|%s" % (session.port, session.cid))
+        ) % (self._push_url(), session.key())
         return prelude + _load_inject()
 
     def _session_by_sid(self, sid: str):
         for session in self.sessions:
-            if "%s|%s" % (session.port, session.cid) == sid:
+            if session.key() == sid:
                 return session
+        # Execution-context IDs are only unique inside one browser target.
+        # Accept an old identifier only when it is unambiguous.
+        legacy = [s for s in self.sessions if "%s|%s" % (s.port, s.cid) == sid]
+        if len(legacy) == 1:
+            return legacy[0]
         return None
 
     def _pump_push(self) -> None:
@@ -759,27 +663,11 @@ class PddbridgeSource:
         now = time.time()
         key = (kind, key_str)
         last = self._seen.get(key)
-        if last is not None and now - last < self._dedup_window:
+        if last is not None and now - last < 120:
             self._seen[key] = now
             return True
         self._seen[key] = now
         return False
-
-    def _prune_dedup(self, now: float) -> None:
-        """清掉已经出判重窗口的条目。
-
-        判据是 `now - last < 窗口`，所以窗口外的条目**永远不可能再命中**，
-        清掉不改变任何去重决策；不清则是"每条消息常驻一条"，跑满一天班就是几十万条，
-        而且每条新消息都要在这张越来越大的表上做一次查找。
-        """
-        cutoff = now - self._dedup_window
-        for table in (self._seen, self._seen_any):
-            # 表不大时不必每次重建列表；只有涨到阈值才扫一遍。
-            if len(table) <= _DEDUP_PRUNE_THRESHOLD:
-                continue
-            for key, last in list(table.items()):
-                if last < cutoff:
-                    table.pop(key, None)
 
     def _forget_frame(self, entry: dict) -> None:
         try:
@@ -800,12 +688,7 @@ class PddbridgeSource:
             return False
         now = time.time()
         last = self._seen_any.get(key_str)
-        if last is not None and now - last < self._dedup_window:
-            # 命中时**刷新**时间戳（和 _dedup 一致）。不刷新的话窗口从"第一次上报"
-            # 起算，而同一条消息会被历史补拉按固定节奏反复重报 —— 累计到窗口之外
-            # 就再漏一次，然后再等一个窗口。实测重报间隔 243s、窗口 600s，就是
-            # "漏一条、压两条、再漏一条"的锯齿。刷新后只要它还在被重报就一直压住。
-            self._seen_any[key_str] = now
+        if last is not None and now - last < 120:
             return True
         self._seen_any[key_str] = now
         return False
@@ -898,7 +781,7 @@ class PddbridgeSource:
         skipped: list = []
         for port in ports:
             try:
-                hits = pdd_cdp.find_socketutil_sessions(port, eval_timeout=self._eval_timeout)
+                hits = pdd_cdp.find_socketutil_sessions(port)
             except Exception as exc:
                 log.warning("find_socketutil_sessions port=%s error: %s", port, exc)
                 continue
@@ -909,9 +792,7 @@ class PddbridgeSource:
                     session.close()      # 已在挂, 不重复开连接
                     continue
                 try:
-                    # 注入是整份 inject.js，比常规求值大得多，给宽一点的预算
-                    r = session.cdp.eval(self._inject_payload(session), session.cid,
-                                         timeout=max(self._eval_timeout, 10.0))
+                    r = session.cdp.eval(self._inject_payload(session), session.cid)
                 except Exception as exc:
                     log.warning("inject eval port=%s error: %s", port, exc)
                     r = None
@@ -979,27 +860,24 @@ class PddbridgeSource:
                 log.warning("health check failed %s -> 丢弃该会话", session.label())
                 self._drop_session(session)
                 continue
-            # 静默检测 —— 唯一的可靠信号。
-            # 原来探 window.socketUtil.socket.readyState，但那是探域自己的包装对象
-            # （constructor 是 Object，只有 send 方法，没有 readyState），探针恒返回
-            # 'none'，每 2 分钟刷一条假告警，把排查带偏（实测确认）。getSocket() 同样是
-            # 包装对象。既然拿不到真实连接状态，就改用「多久没收到帧」——这才是能真正
-            # 反映"工作台有没有在推送"的量，而且省掉每会话每 5 秒一次 CDP eval。
+            # socket 存活检查: 钩子活着但工作台未建 IM WebSocket（无打开会话）时
+            # 不会有任何推送, 静默等价于不收消息 —— 必须大声说出来。
             try:
-                silent_seconds = float(self.cfg.get("silent_warn_seconds") or 300.0)
-            except (TypeError, ValueError):
-                silent_seconds = 300.0
-            if silent_seconds > 0:
-                base = session.last_frame_at or session.attached_at
-                quiet = time.time() - base if base else 0.0
-                session.socket_state = "silent" if quiet >= silent_seconds else "flowing"
-                if base and quiet >= silent_seconds:
+                r = session.cdp.eval(
+                    "(function(){var su=window.socketUtil;"
+                    "return JSON.stringify({uid:new URLSearchParams(location.search).get('uid')||'',"
+                    " st:(su&&su.socket)?(su.socket.readyState==null?'none':su.socket.readyState):'no_socket'});})()",
+                    session.cid)
+                info = json.loads(r) if isinstance(r, str) else {}
+                session.socket_state = str(info.get("st") or "unknown")
+                if session.socket_state not in ("1", "open"):
                     self._warn_throttled(
-                        "silent_%s" % session.key(),
-                        "工作台已 %.0f 秒没有任何帧（%s）：PDD 在未打开会话时不推送, "
-                        "点开任意买家会话即可恢复接收；若确实没有买家在说话可忽略"
-                        % (quiet, session.label()),
-                        interval=max(120.0, silent_seconds))
+                        "socket_dead",
+                        "工作台聊天 socket 未连接(state=%s uid=%s): 未打开会话时 PDD 不推送, "
+                        "打开任意买家会话即可恢复接收" % (session.socket_state, info.get("uid", "")),
+                        interval=120.0)
+            except Exception:
+                session.socket_state = "probe_failed"
             self._refresh_account_hint(session)
         self._last_health = time.time()
 
@@ -1018,11 +896,6 @@ class PddbridgeSource:
         return reconnect
 
     def _do_pull_history(self, uid, account, size, begin_msg_id, start_index, pre_msg_id, event) -> None:
-        # 应答（list 帧）是异步落进页面缓冲的，得靠 drain 取走。记下时刻让主循环
-        # 在接下来这个窗口里按快节奏轮（见 _round_interval）——只补历史时它平时在慢轮。
-        # 用 monotonic：这里量的是"过了多久"，墙钟被 NTP 回拨就会算成负数/巨值，
-        # 快轮窗口要么永远开着要么永远关着。同文件的 waiter.deadline 也是 monotonic。
-        self._last_pull_at = time.monotonic()
         session = self._session_for_send(account)
         if session is None:
             event.result = {"ok": False, "status": "blocked", "via": "cdp_history",
@@ -1034,7 +907,7 @@ class PddbridgeSource:
                 "{ok:false,err:'no helper'})"
                 % (uid, size, begin_msg_id, start_index, pre_msg_id))
         try:
-            r = session.cdp.eval(expr, session.cid, timeout=self._eval_budget(event))
+            r = session.cdp.eval(expr, session.cid)
         except Exception as exc:
             event.result = {"ok": False, "status": "failed", "via": "cdp_history", "error": str(exc)}
             event.set()
@@ -1138,7 +1011,9 @@ class PddbridgeSource:
                 # 运行时新增账号 / 切店铺后页面重载: 补挂新上下文, 不动已挂的
                 self._scan_and_attach()
                 next_rescan = now + rescan
-            self._pump_round()
+            for session in list(self.sessions):
+                if self._pump_session(session) != "ok":
+                    self._drop_session(session)
             if not self.sessions:
                 log.warning("pddbridge 全部会话注入丢失 -> 重新扫描")
                 self._set_state(SCANNING)
@@ -1147,88 +1022,29 @@ class PddbridgeSource:
                 continue
             if now - self._last_health > health:
                 self._health_check()
-            # 判重表按窗口滚动清理：不清的话"每条消息常驻一条"，跑一天班几十万条。
-            if now - self._last_dedup_prune > _DEDUP_PRUNE_INTERVAL_SECONDS:
-                self._last_dedup_prune = now
-                self._prune_dedup(now)
-            self._wake.wait(self._round_interval())   # 有推送/动作就立刻醒
+            self._wake.wait(poll)   # 有推送就立刻醒; 没推送就 200ms 轮一次
             self._wake.clear()
 
         self._close_sessions()
 
-    def _eval_budget(self, waiter, cap: float | None = None) -> float:
-        """这次 eval 最多能用几秒：不超过配置预算，也不超过调用方还在等的剩余时间。
-
-        动作（send / pull_history）是在**主循环线程里同步执行**的，一次 eval 超预算
-        就把所有店铺的 drain 一起堵住。所以上限要取两者的小值：让 eval 比调用方的
-        wait 还长，等于白占着共享线程等一个已经没人要的结果。
-        """
-        limit = self._eval_timeout if cap is None else min(self._eval_timeout, cap)
-        try:
-            deadline = float(waiter.deadline)
-        except (AttributeError, TypeError, ValueError):
-            return limit
-        if deadline <= 0:
-            # _SendWaiter.deadline 的类默认值就是 0.0（"没设过期时间"）。
-            # 别把它当成"已经过期"——那会让一次发送只拿到 50ms 的求值预算，
-            # 页面稍慢就误报发送失败。
-            return limit
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return 0.05          # 调用方已经不等了，做最后一次尽力而为
-        return max(0.05, min(limit, left))
-
-    def _pump_round(self) -> None:
-        """一轮 drain：总预算 + 断点续轮，一个坏会话不能拖住其余店铺。
-
-        原实现是 `for session in list(self.sessions)` 无预算地串行做，而且**每轮都从
-        sessions[0] 开始**。10 个店铺共用一个线程：只要前面某个 tab 卡住（单次 eval
-        8 秒），这一轮后面的店铺就全都收不到消息；下一轮又从 0 开始，于是尾部会话
-        被稳定饿死 —— 不是偶发超时，是结构性的。
-        """
-        sessions = list(self.sessions)
-        if not sessions:
-            return
-        count = len(sessions)
-        start = self._pump_cursor % count
-        started = time.monotonic()
-        for offset in range(count):
-            index = (start + offset) % count
-            session = sessions[index]
-            if session not in self.sessions:      # 本轮前面已把它摘掉了
-                continue
-            if self._pump_session(session) in ("fail", "lost"):
-                self._drop_session(session)
-            if time.monotonic() - started >= self._round_budget:
-                # 预算用光：记断点，下一轮从这里接着轮，而不是回头再从 0 开始
-                self._pump_cursor = (index + 1) % count
-                self._pump_stats["round_budget_hit"] += 1
-                return
-        self._pump_cursor = 0
-        self._pump_stats["round_full_turns"] += 1
-
-    def _round_interval(self) -> float:
-        """这一轮该等多久再轮下一次。
-
-        只补历史（history_only）时，drain 的唯一用途是接 pull_history 的应答。
-        没有 pull 在飞的时候按 poll 频率轮 10 个会话是纯空转——每秒几十次 eval
-        全是空结果，白占着工作台的主线程（CDP 求值在页面里是串行执行的）。
-        所以：有 pull 刚发过就按 poll 快轮，否则退到 idle 间隔。
-        动作入队和页面推送都会 _wake.set()，不会被这个间隔拖慢。
-        """
-        if not self.history_only:
-            return self._poll
-        if time.monotonic() - self._last_pull_at < self._pull_window:
-            return self._poll
-        return self._idle_poll
-
     # ---------------- 帧处理 ----------------
     def _handle_frame(self, e: dict, session: _Session | None = None) -> None:
-        # 所有入站帧的唯一入口（轮询 drain 与推送通道都走这里）。
-        # 记时间戳用于"静默检测"——那才是能真实反映"工作台有没有在推送"的信号。
-        if session is not None:
-            session.last_frame_at = time.time()
         hint = session.account if session is not None else ""
+        if e.get("dir") == "send_error":
+            key = "%s|%s" % (str(e.get("uid") or ""), str(e.get("content") or "")[:48])
+            with self._lock:
+                pending = self._pending_sends.get(key)
+                if pending and hint and pending.get("account") != hint:
+                    pending = None
+                if pending:
+                    self._pending_sends.pop(key, None)
+            if pending:
+                error = str(e.get("error") or "native send rejected")
+                pending["event"].result = {"ok": False, "status": "failed", "real_send": False,
+                    "via": "cdp", "error_user": "拼多多客户端拒绝发送: " + error}
+                pending["event"].set()
+                log.warning("native send rejected buyer=%s error=%s", e.get("uid"), error)
+            return
         # localStorage 兕底重放的帧：是早前未送达的旧消息，按历史帧上报（中心自决要不要用）
         history_flag = bool(e.get("replayed"))
         if e.get("dir") == "out":
@@ -1237,16 +1053,15 @@ class PddbridgeSource:
             return
         raw = e.get("data")
         if not raw:
-            if not self.history_only:
-                self._report_frame(e, session, "empty_frame", "")
+            self._report_frame(e, session, "empty_frame", "")
             return
         p = parse_frame(raw)
         kind = p.get("kind")
-        # 只补历史时不报实时帧。**list 必须放行**：pull_history 的应答就是走这个
-        # 分支由 messages_from_list 归一化回来的，挡掉它历史补拉就废了。
-        if self.history_only and kind != "list":
-            return
         if kind == "push":
+            # Native workbench reports our sent messages as a mall_cs push,
+            # rather than a separate send_message response.
+            if p.get("from_role") == "mall_cs":
+                self._handle_send_receipt(p, hint)
             if self._dedup("push", p.get("msg_id")):
                 self.drops["dedup_py"] += 1
                 return
@@ -1259,7 +1074,7 @@ class PddbridgeSource:
             elif msg:
                 self.drops["dedup_py"] += 1
         elif kind == "send_message":
-            self._handle_send_receipt(p)
+            self._handle_send_receipt(p, hint)
             msg = self._normalize_send_message(p, account_hint=hint)
             if msg and not self._seen_before(msg.get("msg_id")):
                 self.msg_count += 1
@@ -1294,13 +1109,15 @@ class PddbridgeSource:
             return
         try:
             info = session.cdp.eval(
-                "window.__pddBridge_info ? window.__pddBridge_info() : null", session.cid,
-                timeout=self._eval_timeout,
+                "(function(){var i=window.__pddBridge_info ? window.__pddBridge_info() : null;"
+                "if(i)i.sendTextReady=!!(window.socketUtil && typeof window.socketUtil.sendMsg==='function'"
+                " && typeof window.__pddBridge_sendText==='function');return i;})()", session.cid
             )
         except Exception:
             return
         if not isinstance(info, dict):
             return
+        session.send_capable = bool(info.get("sendTextReady"))
         account = str(info.get("csidGuess") or "").strip()
         mall_id = str(info.get("globalMallId") or "").strip()
         uid = str(info.get("globalUid") or "").strip()
@@ -1340,12 +1157,39 @@ class PddbridgeSource:
             "raw_type": None,
         }
 
+    def _account_for_frame(self, raw: dict, hint: str = "") -> str:
+        """Resolve the platform's explicit mall before any page/global hint."""
+        from .pdd_context import mall_id_from_account
+        message = raw.get("message") or raw
+        mall = ""
+        for endpoint in (message.get("to"), message.get("from")):
+            if isinstance(endpoint, dict) and endpoint.get("role") == "mall_cs":
+                mall = str(endpoint.get("mall_id") or endpoint.get("mallId") or endpoint.get("uid") or "")
+                if mall:
+                    break
+        if mall:
+            if hint and str(mall_id_from_account(hint) or "") == mall:
+                return str(hint)
+            accounts = {s.account for s in self.sessions if s.mall_id == mall and s.account}
+            if len(accounts) == 1:
+                return accounts.pop()
+            return ""
+        if hint and ACCOUNT_RE.fullmatch(_canonical_account(hint)):
+            return str(hint)
+        accounts = {s.account for s in self.sessions if s.account}
+        return next(iter(accounts)) if len(accounts) == 1 else ""
+
     def _normalize_message(self, bm: dict, history: bool = False,
                            account_hint: str = "") -> dict | None:
         """买家方向消息归一化。异常帧不再丢弃: 带原因标记照报, 回不回由大脑决定。"""
         buyer_id = str(bm.get("buyer_id") or "")
         role = bm.get("from_role") or "user"
-        csid = bm.get("seller_id") or account_hint or self._account_hint
+        explicit_account = _canonical_account(bm.get("seller_id") or "")
+        csid = self._account_for_frame(bm.get("raw") or {},
+            explicit_account if ACCOUNT_RE.fullmatch(explicit_account) else account_hint)
+        if not csid:
+            self._warn_throttled("unresolved_message_shop", "消息店铺归属无法确定，等待页面通道补报")
+            return None
         seat_uid = _seat_uid(_canonical_account(csid))
         reason = ""
         if not buyer_id:
@@ -1365,7 +1209,7 @@ class PddbridgeSource:
         msg = self._base_message(
             buyer_id, role, bm.get("content"), bm.get("ts"),
             bm.get("msg_id"), bm.get("pre_msg_id"), csid,
-            bm.get("nickname"),
+            bm.get("nickname") if role == "user" else "",
         )
         msg["raw_type"] = bm.get("type")
         if reason:
@@ -1422,7 +1266,7 @@ class PddbridgeSource:
     def _normalize_send_message(self, p: dict, account_hint: str = "") -> dict | None:
         """send_message 回执帧 → 客服(mall_cs)方向消息（对齐探域 business_message 双向语义）。"""
         from_ = (p.get("obj") or {}).get("message", {}).get("from") or {}
-        csid = seller_id(p) or account_hint or self._account_hint or from_.get("uid")
+        csid = self._account_for_frame(p.get("obj") or {}, seller_id(p) or account_hint)
         to_uid = _to_buyer_uid(p)
         seat_uid = _seat_uid(_canonical_account(csid))
         if not to_uid or (seat_uid and to_uid == seat_uid):
@@ -1472,8 +1316,7 @@ class PddbridgeSource:
             return
         # 防串台: 该会话页面的 globalMallId 与目标 account 的 mall 比对
         try:
-            info = session.cdp.eval("window.__pddBridge_info ? window.__pddBridge_info() : null",
-                                    session.cid, timeout=self._eval_budget(event))
+            info = session.cdp.eval("window.__pddBridge_info ? window.__pddBridge_info() : null", session.cid)
         except Exception as exc:
             log.warning("__pddBridge_info error: %s", exc)
             info = None
@@ -1489,9 +1332,11 @@ class PddbridgeSource:
                 }
                 event.set()
                 return
-        expr = ("window.__pddBridge_sendText ? "
-                "window.__pddBridge_sendText(%r, %r, %r) : "
-                "{ok:false,err:'no bridge'}" % (str(uid), str(content), csid or None))
+        # Serialize JavaScript arguments as JSON: Python None/repr are not JS literals.
+        arguments = ", ".join(json.dumps(value, ensure_ascii=True)
+                              for value in (str(uid), str(content), csid or None))
+        expr = ("window.__pddBridge_sendText ? window.__pddBridge_sendText("
+                + arguments + ") : {ok:false,err:'no bridge'}")
         if event.expired():
             event.result = {"ok": False, "status": "expired", "real_send": False,
                             "retryable": False, "via": "expired"}
@@ -1504,13 +1349,23 @@ class PddbridgeSource:
                 event.result = direct
                 event.set()
                 return
+        key = "%s|%s" % (str(uid), str(content)[:48])
+        with self._lock:
+            self._pending_sends[key] = {
+                "uid": str(uid), "content": str(content), "event": event,
+                "deadline": time.time() + timeout, "account": str(account or ""),
+            }
         try:
-            r = session.cdp.eval(expr, session.cid, timeout=self._eval_budget(event, timeout))
+            r = session.cdp.eval(expr, session.cid)
         except Exception as exc:
             log.warning("sendText eval error: %s", exc)
             r = None
         self.send_count += 1
+        if event.result is not None:
+            return
         if not (isinstance(r, dict) and r.get("ok") is True):
+            with self._lock:
+                self._pending_sends.pop(key, None)
             err = ""
             if isinstance(r, dict):
                 err = str(r.get("err") or r)
@@ -1520,14 +1375,9 @@ class PddbridgeSource:
             }
             event.set()
             return
-        # 登记 pending 回执, 等 drain 里的 send_message 帧
-        key = "%s|%s" % (str(uid), str(content)[:48])
-        with self._lock:
-            self._pending_sends[key] = {
-                "uid": str(uid), "content": str(content), "event": event,
-                "deadline": time.time() + timeout, "account": str(account or ""),
-            }
-        log.info("send accepted uid=%s csid=%s (等待回执)", uid, csid)
+        # Pending is registered before eval so an immediate native echo can
+        # confirm it while the CDP call is still returning.
+        log.info("send accepted uid=%s account=%s csid=%s (等待回执)", uid, account, r.get("csid") or csid)
 
     def _match_pending_send(self, p: dict) -> dict | None:
         """回执帧里的 to.uid 不可信：优先认我们自己登记过的那次发送（uid 是我们发出的） 。
@@ -1542,17 +1392,25 @@ class PddbridgeSource:
                        if str(row.get("content") or "")[:48] == content]
         return matches[0] if len(matches) == 1 else None
 
-    def _handle_send_receipt(self, p: dict) -> None:
+    def _handle_send_receipt(self, p: dict, account_hint: str = "") -> None:
+        if not p.get("msg_id") or str(p.get("msg_id")) == "99999999999999":
+            return
+        if (p.get("obj") or {}).get("result") not in (None, "ok"):
+            return
+        receipt_account = self._account_for_frame(p.get("obj") or {}, account_hint)
         to_uid = _to_buyer_uid(p)
         content = str(p.get("content") or "")
         key = "%s|%s" % (to_uid, content[:48])
         with self._lock:
             pend = self._pending_sends.get(key)
+            if pend and (pend.get("account") != receipt_account or pend.get("content") != content):
+                pend = None
             if not pend:
                 # 回执帧的 to.uid 可能是席位自己的 uid → 按内容唯一匹配兜底，
                 # 否则老板收到的“已发送确认”会全部配不上而报未确认。
                 matches = [(item_key, row) for item_key, row in self._pending_sends.items()
-                           if str(row.get("content") or "")[:48] == content[:48]]
+                           if str(row.get("content") or "") == content
+                           and row.get("account") == receipt_account]
                 if len(matches) != 1:
                     return
                 key, pend = matches[0]
@@ -1588,14 +1446,15 @@ def channel_status_cdp(cfg: dict | None = None) -> dict:
         discovery = "cdp_auto"
     port = alive[0] if alive else None
     injected = bool(st.get("injected"))
+    send_ready = bool(st.get("send_ready"))
     return {
-        "dll_ready": injected,
+        "dll_ready": send_ready,
         "dll_port": port,
         "cdp_port": port,
         "workbench_pid": None,
         "port_discovery": discovery,
         "receive_ready": injected,
-        "send_ready": injected and st.get("state") == "listening",
+        "send_ready": send_ready,
         "sessions": len(st.get("sessions") or []),
         "accounts": list(st.get("accounts") or []),
         "hint": ("CDP 注入已就绪（%d 个店铺账号）" % len(st.get("accounts") or []))

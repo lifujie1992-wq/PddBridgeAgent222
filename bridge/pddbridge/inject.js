@@ -6,10 +6,7 @@
      于是升级后页面上会同时有两条监听，每条入站帧被两个闭包各记一次：
        缓冲容量减半；上行每帧两份；溢出时旧闭包先 splice 且不落盘 —— spill 兜底被绕过。
      版本号对不上就只能整页刷新让窗口重来（刷新后 hooked 不存在，不会循环）。 */
-  /* v5: 自己注册监听改走原生 addEventListener（旧版被自己的包装再套一层、每帧跑两次），
-     并对称 patch removeEventListener，让 __pddBridge_off 真的摘得掉。旧的摘不掉的监听
-     只能靠整页刷新清掉，所以必须提版本号。 */
-  var BRIDGE_VER = 5;
+  var BRIDGE_VER = 4;
   if (window.__pddBridge_hooked && window.__pddBridge_ver !== BRIDGE_VER) {
     var reloading = false;
     try { reloading = true; location.reload(); } catch (e) {}
@@ -165,13 +162,6 @@
     if (!pushEntry(entry)) bufferEntry(entry);
   }
   function pushIn(e) {
-    /* 同一帧会被记多次：每个 message 监听都被包了一层、各调一次 pushIn
-       （页面自己挂几条就记几次），重注入也会叠加。用事件对象本身打标，
-       保证"一个事件只记一次"——无论外面挂了几个监听。 */
-    if (e && typeof e === 'object') {
-      if (e.__pddBridge_seen) return;
-      try { e.__pddBridge_seen = 1; } catch (err) { /* 冻结对象：退回旧行为 */ }
-    }
     record({ t: Date.now(), dir: 'in', data: rawFrame(e) });
   }
 
@@ -287,12 +277,36 @@
   };
   window.__pddBridge_sendText = function (uid, content, csid) {
     if (!su || typeof su.sendMsg !== 'function') return { ok: false, err: 'no socketUtil' };
+    // Use the same sender label as the official client's send action.
+    if (!csid) {
+      var app = document.getElementById('app');
+      var vm = app && app.__vue__;
+      var user = vm && vm.$store && vm.$store.state.userInfo;
+      csid = user && (user.nickname || user.username);
+    }
+    if (!csid) return { ok: false, err: '客服身份未就绪，无法发送' };
     var opts = { uid: String(uid), content: String(content), cb: function () {} };
-    if (csid) opts.csid = String(csid);
+    opts.csid = String(csid);
+    var nativeBridge = window.pinbridge;
+    var originalCall = nativeBridge && nativeBridge.callNative;
+    if (typeof originalCall === 'function') {
+      nativeBridge.callNative = function (module, method, params, success, failure) {
+        if (module === 'MMSSocket' && method === 'send' && params && params.cmd === 'send_message') {
+          var originalFailure = failure;
+          failure = function (code, reason) {
+            record({t: Date.now(), dir: 'send_error', uid: String(uid), content: String(content),
+                    error: String(reason || code || 'native send rejected')});
+            if (typeof originalFailure === 'function') originalFailure.apply(this, arguments);
+          };
+        }
+        return originalCall.call(this, module, method, params, success, failure);
+      };
+    }
     try {
       var p = su.sendMsg(opts);
-      return { ok: true, promise: !!p };
+      return { ok: true, accepted: true, csid: String(csid) };
     } catch (e) { return { ok: false, err: e && e.message }; }
+    finally { if (typeof originalCall === 'function') nativeBridge.callNative = originalCall; }
   };
   /* 直接按 uid 拉历史（服务端分页）：不必先 open_chat 让页面自己加载。
      页大小可自定（页面内置请求写死 20）；应答是 cmd:"list" 帧，走既有帧流。 */
@@ -338,27 +352,12 @@
     window.__pddBridge_proto = 1;
     var desc = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
     var origAdd = WebSocket.prototype.addEventListener;
-    var origRemove = WebSocket.prototype.removeEventListener;
-    /* 原生版留给"自己注册监听"用。下面这一挂会把自己也包进去：
-         cand.addEventListener('message', pushIn)
-       → wrapped = function(e){ pushIn(e); return pushIn.apply(...) }
-       → 每帧 pushIn 跑两次；而且 __pddBridge_off 存的是 pushIn、实际注册的是
-         wrapped，removeEventListener 永远对不上 → 摘不掉 → 每次重注入再叠一层。 */
-    window.__pddBridge_origAdd = origAdd;
-    window.__pddBridge_origRemove = origRemove;
     WebSocket.prototype.addEventListener = function (type, fn, opts) {
       if (type === 'message' && typeof fn === 'function') {
         var wrapped = function (e) { pushIn(e); return fn.apply(this, arguments); };
-        try { fn.__pddBridge_wrapped = wrapped; } catch (e) {}   /* 让 remove 能对上 */
         return origAdd.call(this, type, wrapped, opts);
       }
       return origAdd.apply(this, arguments);
-    };
-    /* 对称 patch：页面自己 remove 被包过的监听时，得按包装体去摘，否则摘不掉。 */
-    WebSocket.prototype.removeEventListener = function (type, fn, opts) {
-      var actual = fn;
-      if (type === 'message' && fn && fn.__pddBridge_wrapped) actual = fn.__pddBridge_wrapped;
-      return origRemove.call(this, type, actual, opts);
     };
     Object.defineProperty(WebSocket.prototype, 'onmessage', {
       get: desc.get,
@@ -384,12 +383,7 @@
     var cand = candidates[ci];
     if (cand && typeof cand.addEventListener === 'function') {
       try {
-        /* 走原生 addEventListener：走被 patch 的那个会被再包一层，每帧入队两次。 */
-        if (window.__pddBridge_origAdd && cand instanceof WebSocket) {
-          window.__pddBridge_origAdd.call(cand, 'message', pushIn);
-        } else {
-          cand.addEventListener('message', pushIn);
-        }
+        cand.addEventListener('message', pushIn);
         listeners.push([cand, pushIn]);
         attached = 1;
       } catch (e) { attached = -1; }
@@ -404,7 +398,10 @@
   };
 
   /* ---- native 模式: pinnotification.message = native→JS 入站总入口 ---- */
-  var pinAttached = 0;
+  /* 原生回调装好即就绪；重复注入复用现有钩子，无需等待第一条入站消息。 */
+  var pinAttached = (window.pinnotification &&
+                     typeof window.pinnotification.message === 'function' &&
+                     window.pinnotification.message.__pddBridge_wrapped) ? 1 : 0;
   try {
     if (window.pinnotification && typeof window.pinnotification.message === 'function' && !window.pinnotification.message.__pddBridge_wrapped) {
       var origMsg = window.pinnotification.message.bind(window.pinnotification);
@@ -420,6 +417,7 @@
       };
       try { window.pinnotification.message.__pddBridge_wrapped = 1; } catch (e) {}
       window.__pddBridge_pin = 1;
+      pinAttached = window.pinnotification.message.__pddBridge_wrapped ? 1 : 0;
     }
   } catch (e) { pinAttached = -2; }
 
