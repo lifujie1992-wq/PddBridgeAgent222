@@ -213,7 +213,14 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "history_pull_size": int(data.get("history_pull_size") or 20),
         "history_pull_max_buyers": int(data.get("history_pull_max_buyers") or 40),
         "history_pull_gap_seconds": float(data.get("history_pull_gap_seconds") or 0.3),
+        "history_pull_timeout_seconds": float(data.get("history_pull_timeout_seconds") or 3.0),
         "history_report_max_age_seconds": float(data.get("history_report_max_age_seconds") or 1800),
+        # 历史/回扫事件等多久才上送。legacy=90s（兼容不认 is_history 的老中心）；
+        # ack_capable=0s（中心自己按 is_history 决定回不回，不必再压 90 秒）。
+        "history_hold_policy": str(data.get("history_hold_policy") or "legacy"),
+        "history_live_window_seconds": float(
+            data["history_live_window_seconds"]
+            if data.get("history_live_window_seconds") is not None else 90.0),
         "history_report_user_only": bool(data.get("history_report_user_only", True)),
         "send_confirm_timeout_seconds": float(data.get("send_confirm_timeout_seconds") or 10.0),
         "local_first_max_wait_seconds": float(data.get("local_first_max_wait_seconds") or 1.0),
@@ -302,6 +309,19 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "websocket_url": str(cfg.get("websocket_url") or ""),
         "websocket_path": str(cfg.get("websocket_path") or "/api/bridge/v1/ws"),
         "websocket_max_inflight": int(cfg.get("websocket_max_inflight") or 64),
+        # 历史回扫 / 上报门槛必须能存盘：GUI 保存只写 payload 里的键，
+        # 老实现漏了这几个，导致"改了配置重启又变回去"。
+        "history_pull_seconds": float(cfg.get("history_pull_seconds") or 0),
+        "history_pull_size": int(cfg.get("history_pull_size") or 20),
+        "history_pull_max_buyers": int(cfg.get("history_pull_max_buyers") or 40),
+        "history_pull_gap_seconds": float(cfg.get("history_pull_gap_seconds") or 0.3),
+        "history_pull_timeout_seconds": float(cfg.get("history_pull_timeout_seconds") or 3.0),
+        "history_report_max_age_seconds": float(cfg.get("history_report_max_age_seconds") or 1800),
+        "history_report_user_only": bool(cfg.get("history_report_user_only", True)),
+        "history_hold_policy": str(cfg.get("history_hold_policy") or "legacy"),
+        "history_live_window_seconds": float(
+            cfg["history_live_window_seconds"]
+            if cfg.get("history_live_window_seconds") is not None else 90.0),
         "local_queue_path": cfg.get("local_queue_path"),
         "command_journal_path": cfg.get("command_journal_path"),
         "local_workbench_url": cfg.get("local_workbench_url"),
@@ -363,8 +383,11 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "history_pull_size": 20,
         "history_pull_max_buyers": 40,
         "history_pull_gap_seconds": 0.3,
+        "history_pull_timeout_seconds": 3.0,
         "history_report_max_age_seconds": 1800,
         "history_report_user_only": True,
+        "history_hold_policy": "legacy",
+        "history_live_window_seconds": 90,
         "send_confirm_timeout_seconds": 10.0,
         "local_first_max_wait_seconds": 1.0,
         "local_queue_path": str(cfg_path.parent / f"bridge_queue_{plat.name}.jsonl"),

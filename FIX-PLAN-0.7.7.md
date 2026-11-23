@@ -210,3 +210,48 @@ spool 帧数        : 17
 
 - 本批**没有**改 CDP 路径、没有改 90 秒门槛、没有动上传批次；`recv_via_dll=false` 时行为与 0.7.6 完全一致。
 - 问题 3/4/5（逐店隔离、超时、hold 原因日志）在下一批，和本批互不依赖。
+
+---
+
+# 附录 B：0.7.8.0（回应客户 0.7.7.0 复测第 1、2 条）
+
+客户 0.7.7.0 复测：出站 0 秒、入站仍 89–90 秒。**这是预期**——0.7.7.0 只做了原生通道
+"接线"，`recv_via_dll` 默认 false（要现场 PROBE 定槽位），90 秒门槛一行没动。
+
+## B.1 已改
+
+| 文件 | 改动 |
+|---|---|
+| `bridge/message_timing.py` | `history_ready(event, now, window_seconds=None)`：门槛可传参；`hold_remaining()` 给"卡在哪"的日志用 |
+| `bridge/agent.py` | `_history_window()`：`history_hold_policy=legacy|ack_capable`、`history_live_window_seconds=N`；`_queue_hold()` 心跳打原因；回扫循环改成**按起始时刻排程**（不再"做完再等 interval"），`history_pull_timeout_seconds` 默认 3s |
+| `bridge/config.py` | 新增 4 个键并**写进 save_config**（老实现漏了 history_* 的持久化，GUI 一保存就回默认） |
+| `tests/` | 新增 2 条：门槛语义（0/N/None）、policy→window 映射 |
+
+## B.2 客户两条请求的落点
+
+1. **"90 秒做成配置项，或降到 10–15 秒"**
+   `history_hold_policy=ack_capable` → 立即上送；或 `history_live_window_seconds=15` → 等 15 秒。
+   我们中心已按 `is_history` 返回 `ignored`（见 CENTER_CONTRACT_REQUEST_0.5.19.13.md），
+   可以直接用 `ack_capable`；只有对接**第三方老中心**时才需要 `legacy`。
+2. **"入站为什么只对当前打开会话生效，能否按账号订阅全部会话"**
+   这就是 CDP 方案的物理限制：工作台只把"当前激活会话"的 push 交给页面，注入层只能看到这一条。
+   按账号订阅全部会话 = 走原生进程级回调（`recv_via_dll`，0.7.7.0 已接线），
+   它不是"页面订阅"，是工作台进程内 `CMChatImpl::Register(VIMsgCallBack)` 的全局回调，
+   所有店铺、所有会话的 push 都会进来。
+
+## B.3 现场建议配置（20 店）
+
+```jsonc
+{
+  "recv_via_dll": true,              // 定槽后打开：入站实时，覆盖全部会话
+  "recv_slot": N,                    // PROBE 探针确认
+  "history_hold_policy": "ack_capable",
+  "history_pull_seconds": 15,
+  "history_pull_timeout_seconds": 3,
+  "history_pull_max_buyers": 200,    // 20 店时 40 不够
+  "history_pull_gap_seconds": 0.1
+}
+```
+
+预期：开机/切店后 `history pull` 周期回到 15 秒量级、抓取延迟 ≤15 秒、上报门槛 0 秒 →
+端到端 15–20 秒；`recv_via_dll` 生效后新消息直接 0–1 秒。

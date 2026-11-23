@@ -26,7 +26,8 @@ from .platforms import get_platform
 from .watcher import LogWatcher
 from .message_timing import (TIMING_FIELDS, FUTURE_TOLERANCE_SECONDS,
                              TAKEOVER_PARENT_MAX_AGE_SECONDS, epoch_seconds,
-                             stamp_message, history_ready, command_expired, queue_metrics)
+                             stamp_message, history_ready, command_expired, queue_metrics,
+                             hold_remaining)
 
 log = logging.getLogger("pdd.bridge")
 
@@ -727,6 +728,68 @@ class BridgeAgent:
             value = 0
         return max(1, min(value or 500, 2000))
 
+    def _history_window(self) -> float:
+        """历史事件要等多久才上送（秒）。
+
+        ``history_hold_policy``：
+          * ``legacy``（默认）→ 90 秒，兼容不认 is_history 的老中心；
+          * ``ack_capable`` → 0 秒，中心已按 is_history 自行决定回不回，不必压。
+        ``history_live_window_seconds`` 可直接指定秒数，优先级最高。
+        """
+        policy = str(self.cfg.get("history_hold_policy") or "legacy").strip().lower()
+        default = 0.0 if policy in {"ack_capable", "off", "none", "disabled"} else 90.0
+        try:
+            value = float(self.cfg.get("history_live_window_seconds", default))
+        except (TypeError, ValueError):
+            value = default
+        return max(0.0, value)
+
+    def _queue_hold(self, pending, now: float) -> dict:
+        """算清楚"队列里这些事件为什么还没发"，给心跳日志用。
+
+        旧实现只打 oldest_wait，客户和我们自己都分不清是等历史门槛、在途、
+        重试，还是等本地优先队列——每次都靠猜。
+        """
+        window = self._history_window()
+        inflight = set(getattr(self, "_inflight_ids", None) or ())
+        retrying = time.monotonic() < getattr(self, "_upload_retry_at", 0)
+        counts: dict[str, int] = {}
+        remaining = float("inf")
+        for event in pending:
+            event_id = str(event.get("event_id") or "")
+            if event_id in inflight:
+                counts["inflight"] = counts.get("inflight", 0) + 1
+                continue
+            if retrying:
+                counts["client_retry"] = counts.get("client_retry", 0) + 1
+                continue
+            wait = hold_remaining(event, now, window)
+            if wait > 0:
+                counts["hold_window"] = counts.get("hold_window", 0) + 1
+                remaining = min(remaining, wait)
+            else:
+                counts["ready"] = counts.get("ready", 0) + 1
+        if not pending:
+            reason = "idle"
+        else:
+            # 优先报真正卡住的那一类；inflight/ready 只是瞬时状态
+            for key in ("hold_window", "client_retry", "inflight", "ready"):
+                if counts.get(key):
+                    reason = key
+                    break
+            else:
+                reason = "unknown"
+        oldest = max(0.0, now - min(
+            [float(e.get("captured_at") or 0) for e in pending] or [now]))
+        return {
+            "held": counts.get("hold_window", 0) + counts.get("client_retry", 0),
+            "reason": reason,
+            "hold_reasons": counts,
+            "window_seconds": round(window, 1),
+            "min_remaining_seconds": round(remaining, 1) if remaining != float("inf") else None,
+            "oldest_wait_seconds": round(oldest, 3),
+        }
+
     def _flush_events(self, *, blocked_ids: Optional[set[str]] = None) -> None:
         now = time.time()
         history_now = self.client.server_now() - 1.0 if hasattr(self.client, "server_now") else now
@@ -734,6 +797,7 @@ class BridgeAgent:
             history_now = 0.0
         if time.monotonic() < getattr(self, "_upload_retry_at", 0):
             return
+        window = self._history_window()
         with self._pending_lock:
             inflight = getattr(self, "_inflight_ids", None)
             if inflight is None:
@@ -743,7 +807,7 @@ class BridgeAgent:
             ready = [e for e in self._pending
                      if str(e.get("event_id") or "") not in inflight
                      and e.get("event_id") not in (blocked_ids or set())
-                     and history_ready(e, history_now if e.get("is_history") else now)]
+                     and history_ready(e, history_now if e.get("is_history") else now, window)]
             # Live traffic goes first; reserve part of each batch for acknowledged backfill.
             live = [e for e in ready if not e.get("is_history")]
             history = [e for e in ready if e.get("is_history")]
@@ -1258,8 +1322,20 @@ class BridgeAgent:
             gap = max(0.0, float(self.cfg.get("history_pull_gap_seconds") or 0.3))
         except (TypeError, ValueError):
             gap = 0.3
+        try:
+            pull_timeout = max(1.0, float(self.cfg.get("history_pull_timeout_seconds") or 3.0))
+        except (TypeError, ValueError):
+            pull_timeout = 3.0
+        # 按“起始时刻 + interval”排程，而不是“做完再等 interval”。
+        # 旧写法把一轮的耗时（每个会话 eval + gap）叠在周期上：客户现场 2 个店铺都能
+        # 拖到 41–49 秒才抓到，端到端就被无谓拉长了。
+        deadline = time.monotonic()
         while not self._stop.is_set():
-            if self._stop.wait(interval):
+            deadline += interval
+            wait_for = deadline - time.monotonic()
+            if wait_for > 0 and self._stop.wait(wait_for):
+                break
+            if self._stop.is_set():
                 break
             recent = getattr(self, "_recent_buyers", None) or {}
             targets = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)[:max_buyers]
@@ -1268,7 +1344,8 @@ class BridgeAgent:
                 if self._stop.is_set():
                     break
                 try:
-                    self.pddbridge_source.pull_history(buyer, account, size=size, timeout=5.0)
+                    self.pddbridge_source.pull_history(buyer, account, size=size,
+                                                       timeout=pull_timeout)
                     pulled += 1
                 except Exception as exc:  # 单条失败不影响其他会话
                     log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
@@ -1294,10 +1371,20 @@ class BridgeAgent:
         self._last_status = dict(status)
         with self._pending_lock:
             metrics = queue_metrics(self._pending)
-        status["event_queue"] = metrics
+            hold = self._queue_hold(self._pending, time.time())
+        status["event_queue"] = {**metrics, **hold}
         log.info("event queue pending=%d oldest_wait=%.3fs capture_delay_max=%.3fs history=%d",
                  metrics["pending"], metrics["oldest_wait_seconds"],
                  metrics["max_capture_delay_seconds"], metrics["history_pending"])
+        # 卡住时必须给原因：是等历史门槛、在途、重试，还是等本地优先队列
+        if hold["held"] and hold["oldest_wait_seconds"] >= 30.0:
+            log.warning("event queue hold %d 条未上送 reason=%s 最老等 %.1fs"
+                        "（门槛 %.0fs，最早一条还要 %.1fs）",
+                        hold["held"], hold["reason"], hold["oldest_wait_seconds"],
+                        hold["window_seconds"], hold["min_remaining_seconds"])
+        else:
+            log.debug("event queue hold held=%d reason=%s min_remaining=%.1fs",
+                      hold["held"], hold["reason"], hold["min_remaining_seconds"])
         try:
             response = self.client.heartbeat(status)
             profile = response.get("parser_profile") if isinstance(response, dict) else None

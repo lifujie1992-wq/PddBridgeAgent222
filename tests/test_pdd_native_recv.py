@@ -236,3 +236,47 @@ def test_receiver_writes_ack_after_successful_callback(monkeypatch):
     assert got == [PUSH, PUSH]
     assert acks == [b"ACK|1\n"]          # 第 2 帧抛异常 → 不回 ACK
     assert recv.acked == 1
+
+
+# ---------------- 0.7.8: 90 秒门槛可配（客户 0.7.7.0 复测第 1 条） ----------------
+def test_history_ready_window_is_configurable():
+    """历史事件的上送门槛：0=立即、N=等 N 秒、None=旧行为 90 秒。"""
+    from bridge.message_timing import LIVE_MAX_AGE_SECONDS, history_ready, hold_remaining
+
+    now = 1_800_000_000.0
+    fresh = {"is_history": True, "ts": now - 10}      # 10 秒前
+    old = {"is_history": True, "ts": now - 120}       # 2 分钟前
+    live = {"is_history": False, "ts": now - 10}
+
+    assert LIVE_MAX_AGE_SECONDS == 90.0
+    assert history_ready(fresh, now) is False          # 旧行为：90 秒内不发
+    assert history_ready(old, now) is True
+    assert history_ready(live, now) is True            # 实时消息不受门槛影响
+
+    assert history_ready(fresh, now, 0) is True        # ack_capable：立即发
+    assert history_ready(fresh, now, 5) is True        # 已过 10s > 5s：放行
+    assert history_ready(fresh, now, 15) is False      # 门槛 15s：还差 5s
+    assert hold_remaining(fresh, now, 30) == 20.0
+    assert hold_remaining(fresh, now, 0) == 0.0
+    # 没有平台时间的永远不发（否则会被当成当前时间回填）
+    assert history_ready({"is_history": True, "ts": 0}, now, 0) is False
+
+
+def test_history_hold_policy_maps_to_window():
+    from bridge.agent import BridgeAgent
+
+    class Stub:
+        pass
+
+    cases = [
+        ({"history_hold_policy": "legacy"}, 90.0),
+        ({}, 90.0),
+        ({"history_hold_policy": "ack_capable"}, 0.0),
+        ({"history_hold_policy": "off"}, 0.0),
+        ({"history_hold_policy": "ack_capable", "history_live_window_seconds": 15}, 15.0),
+        ({"history_live_window_seconds": 0}, 0.0),
+    ]
+    for cfg, expected in cases:
+        stub = Stub()
+        stub.cfg = cfg
+        assert BridgeAgent._history_window(stub) == expected, cfg
