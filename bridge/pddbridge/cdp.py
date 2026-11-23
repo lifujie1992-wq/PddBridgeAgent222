@@ -198,16 +198,23 @@ def find_socketutil_contexts(port):
     return hits
 
 
-def find_socketutil_sessions(port):
+def find_socketutil_sessions(port, skip_ids=None):
     """同 find_socketutil_contexts, 但带上 target url —— 多店铺必须能区分是哪个页面。
 
     返回 [{"cdp": Cdp, "cid": int, "url": str, "title": str}, ...]（未命中的连接已关闭）。
+
+    ``skip_ids``：已挂上的 target id。20 店时每 20 秒重扫会为 20 个 target 各开一条
+    CDP 连接 + enable_runtime（最多 3s），把主循环整段卡住；跳过已知 target 后
+    一次重扫从几十秒降到毫秒级。
     """
+    skip = {str(value) for value in (skip_ids or ()) if value}
     hits = []
     targets = find_chat_targets(port)
     if not targets:
         targets = list_targets(port)
     for t in targets:
+        if skip and str(t.get("id") or "") in skip:
+            continue
         ws_url = t.get("webSocketDebuggerUrl")
         if not ws_url:
             continue

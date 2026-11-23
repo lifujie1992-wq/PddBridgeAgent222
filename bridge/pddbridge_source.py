@@ -108,10 +108,16 @@ def _seat_uid(seller) -> str:
 
 
 class _Session:
-    """一个页面上下文 = 一个账号/店铺的实时通道（多店铺就是多个会话）。"""
+    """一个页面上下文 = 一个账号/店铺的实时通道（多店铺就是多个会话）。
+
+    0.7.8：每个会话自带一把锁和一个动作队列——所有 CDP eval 都过同一把锁
+    （websocket-client 不是线程安全的），拉历史/发送不再阻塞其他店铺。
+    """
 
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
-                 "last_health", "push_ok", "frames", "socket_state", "send_capable")
+                 "last_health", "push_ok", "frames", "socket_state", "send_capable",
+                 "lock", "actions", "worker", "failures", "next_attempt", "next_health",
+                 "last_frame_at", "degraded_at")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -126,6 +132,14 @@ class _Session:
         self.frames = 0
         self.socket_state = "unknown"
         self.send_capable = False
+        self.lock = threading.Lock()
+        self.actions: "queue.Queue" = queue.Queue()
+        self.worker = None
+        self.failures = 0
+        self.next_attempt = 0.0
+        self.next_health = 0.0
+        self.last_frame_at = 0.0
+        self.degraded_at = 0.0
 
     def key(self) -> str:
         # 多个 middle_panel 目标可能共用同一个 executionContextId 和 URL（实测 7 个目标
@@ -269,6 +283,7 @@ class PddbridgeSource:
         self._pending_sends: dict = {}  # "uid|content前48" -> 记录
         self._act: list = []
         self._lock = threading.Lock()
+        self._frame_lock = threading.Lock()   # 多店并行后，帧处理必须串行
         self._stop_evt = threading.Event()
         self._wake = threading.Event()
         self._thread = None
@@ -475,6 +490,8 @@ class PddbridgeSource:
                              if not (name == "send" and args[3] is event)]
                 if key in self._pending_sends:
                     del self._pending_sends[key]
+            # 已派发到某个店铺队列的也要撤回来，否则超时后还会发出去
+            self._cancel_dispatched_send(event)
             return {
                 "ok": True,
                 "status": "indeterminate",
@@ -487,6 +504,24 @@ class PddbridgeSource:
     def reconnect(self) -> None:
         with self._lock:
             self._act.append(("reconnect", ()))
+
+    def _cancel_dispatched_send(self, event) -> None:
+        """从各店铺的动作队列里摘掉一个已超时的发送动作。"""
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            kept: list = []
+            while True:
+                try:
+                    item = session.actions.get_nowait()
+                except queue.Empty:
+                    break
+                name, args = item
+                if name == "send" and len(args) > 3 and args[3] is event:
+                    continue
+                kept.append(item)
+            for item in kept:
+                session.actions.put(item)
 
     # ---------------- 事件/状态 ----------------
     def _emit(self, msg: dict) -> None:
@@ -501,9 +536,11 @@ class PddbridgeSource:
             log.info("pddbridge source state=%s extra=%s", st, extra)
 
     def _close_sessions(self) -> None:
-        for session in list(self.sessions):
+        with self._lock:
+            sessions, self.sessions = list(self.sessions), []
+        for session in sessions:
             session.close()
-        self.sessions = []
+            session.worker = None
         self.port = None
         self._account_hint = ""
 
@@ -514,6 +551,23 @@ class PddbridgeSource:
         self._stop_evt.wait(sec)
 
     # ---------------- 取帧与存活判定 ----------------
+    # ---------------- CDP 调用（每会话一把锁，锁内才有超时） ----------------
+    def _eval_timeout(self) -> float:
+        try:
+            value = float(self.cfg.get("cdp_eval_timeout_seconds") or 3.0)
+        except (TypeError, ValueError):
+            value = 3.0
+        return max(0.5, min(value, 8.0))
+
+    def _eval(self, session: _Session, expr, timeout: float | None = None):
+        """会话内串行 eval。--timeout 缺省用 cdp_eval_timeout_seconds（默认 3s）。
+
+        旧实现一律 8 秒且不串行：20 店时一次慢调用就卡住整片，期间其他店铺的帧
+        全部堵在 CDP 连接上，健康探测也和取帧抢同一条 websocket。
+        """
+        with session.lock:
+            return session.cdp.eval(expr, session.cid, timeout=timeout or self._eval_timeout())
+
     def _drain(self, session: _Session):
         """取一帧批次, 同时判定该页面注入是否还活着。
 
@@ -521,7 +575,7 @@ class PddbridgeSource:
         lossless=True 表示用了 peek（未删数据），调用方处理完必须 _ack；
         旧注入脚本无 peek 时返回 False，行为同旧版（先清后传，CDP 失败即丢）。
         """
-        r = session.cdp.eval(_DRAIN_EXPR, session.cid)
+        r = self._eval(session, _DRAIN_EXPR)
         if r is None:
             raise RuntimeError("cdp eval 无响应(连接断开/超时)")
         if not isinstance(r, dict):
@@ -538,7 +592,7 @@ class PddbridgeSource:
         if count <= 0:
             return
         try:
-            session.cdp.eval(_ACK_EXPR % int(count), session.cid)
+            self._eval(session, _ACK_EXPR % int(count))
         except Exception as exc:
             log.debug("drain ack 失败(下轮会重取): %s", exc)
 
@@ -604,7 +658,117 @@ class PddbridgeSource:
         if lossless and not frame_error:
             self._ack(session, len(frames))
         session.frames += len(frames)
+        if frames:
+            session.last_frame_at = time.time()
         return "ok"
+
+    # ---------------- 逐店隔离：每个会话一个 poller 线程 ----------------
+    def _backoff_max(self) -> float:
+        try:
+            return max(1.0, float(self.cfg.get("cdp_session_backoff_max_seconds") or 30.0))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _health_interval(self) -> float:
+        try:
+            return max(2.0, float(self.cfg.get("cdp_health_interval_seconds") or 30.0))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _ensure_workers(self) -> None:
+        """给每个会话确保一个存活的 poller 线程（20 店 = 20 条并行链路）。"""
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            if session.worker is not None and session.worker.is_alive():
+                continue
+            worker = threading.Thread(target=self._session_worker, args=(session,),
+                                      daemon=True,
+                                      name="pddbridge-session-%s" % (session.account or session.cid))
+            session.worker = worker
+            worker.start()
+
+    def _note_session_failure(self, session: _Session) -> float:
+        """单店失败退避：1s→2s→4s→…→上限（默认 30s）。只影响这一家店。"""
+        session.failures += 1
+        delay = min(self._backoff_max(), 2.0 ** min(session.failures - 1, 5))
+        session.next_attempt = time.time() + delay
+        return delay
+
+    def _session_worker(self, session: _Session) -> None:
+        """单店取帧循环。一家店卡住/超时只退避它自己，不影响其他店铺。"""
+        poll = 0.2
+        try:
+            poll = max(0.05, float(self.cfg.get("cdp_poll_interval") or 0.2))
+        except (TypeError, ValueError):
+            poll = 0.2
+        while not self._stop_evt.is_set() and session in self.sessions:
+            self._run_session_actions(session)
+            now = time.time()
+            if session.next_attempt > now:
+                self._stop_evt.wait(min(poll, session.next_attempt - now))
+                continue
+            try:
+                result = self._pump_session(session)
+            except Exception as exc:            # 防御：worker 绝不能死
+                log.debug("session worker error %s: %s", session.label(), exc)
+                result = "error"
+            if result == "ok":
+                if session.failures:
+                    log.info("pddbridge 会话恢复 %s（连续失败 %d 次后）",
+                             session.label(), session.failures)
+                session.failures = 0
+                session.next_attempt = 0.0
+            elif result == "lost":
+                # 页面重载/切店：只重注入这一家，退避重试，不碰其他店铺
+                self._reinject_session(session)
+            else:
+                delay = self._note_session_failure(session)
+                if session.failures == 1:
+                    log.warning("pddbridge 会话读取失败 %s，单店退避重试（不影响其他店铺）",
+                                session.label())
+                else:
+                    log.debug("pddbridge 会话仍在退避 %s failures=%d next=%.1fs",
+                              session.label(), session.failures, delay)
+            now = time.time()
+            if now >= session.next_health:
+                session.next_health = now + self._health_interval()
+                self._health_check_session(session)
+            self._stop_evt.wait(poll)
+
+    def _reinject_session(self, session: _Session) -> None:
+        """只重注入当前会话；失败则退避，不拉黑整个通道。"""
+        try:
+            r = self._eval(session, self._inject_payload(session))
+            if isinstance(r, dict) and r.get("ok") is True and r.get("attached") == 1:
+                session.failures = 0
+                session.next_attempt = 0.0
+                session.degraded_at = 0.0
+                log.info("pddbridge 会话已重新注入 %s", session.label())
+                return
+            reason = "inject not ready: %s" % (r,)
+        except Exception as exc:
+            reason = str(exc)
+        delay = self._note_session_failure(session)
+        session.degraded_at = time.time()
+        self._warn_throttled("reinject:%s" % session.key(),
+                             "pddbridge 重注入失败 %s: %s（%.0fs 后重试）"
+                             % (session.label(), reason, delay), interval=60.0)
+
+    def _run_session_actions(self, session: _Session) -> None:
+        """在会话自己的工作线程里执行发送/拉历史，避免阻塞主循环和别的店铺。"""
+        for _ in range(4):
+            try:
+                name, args = session.actions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if name == "send":
+                    self._do_send_action(*args)
+                elif name == "pull_history":
+                    self._do_pull_history(*args)
+            except Exception as exc:
+                log.warning("session action %s failed (%s): %s", name, session.label(), exc)
 
     # ---------------- 推送通道（页面直推, 免轮询） ----------------
     def _push_url(self) -> str:
@@ -789,11 +953,13 @@ class PddbridgeSource:
                                      "pddbridge 未发现可用 CDP 端口 discovered=%s" % sorted(discovered),
                                      interval=30.0)
                 return False
-        known = {s.key() for s in self.sessions}
+        with self._lock:
+            known = {s.key() for s in self.sessions}
+            known_targets = {s.target_id for s in self.sessions if s.target_id}
         skipped: list = []
         for port in ports:
             try:
-                hits = pdd_cdp.find_socketutil_sessions(port)
+                hits = pdd_cdp.find_socketutil_sessions(port, skip_ids=known_targets)
             except Exception as exc:
                 log.warning("find_socketutil_sessions port=%s error: %s", port, exc)
                 continue
@@ -804,7 +970,7 @@ class PddbridgeSource:
                     session.close()      # 已在挂, 不重复开连接
                     continue
                 try:
-                    r = session.cdp.eval(self._inject_payload(session), session.cid)
+                    r = self._eval(session, self._inject_payload(session))
                 except Exception as exc:
                     log.warning("inject eval port=%s error: %s", port, exc)
                     r = None
@@ -814,7 +980,9 @@ class PddbridgeSource:
                     session.close()
                     skipped.append(session.target_url or str(port))
                     continue
-                self.sessions.append(session)
+                session.next_health = time.time() + self._health_interval()
+                with self._lock:
+                    self.sessions.append(session)
                 known.add(session.key())
                 self._refresh_account_hint(session)
                 session.last_health = time.time()
@@ -832,13 +1000,21 @@ class PddbridgeSource:
         return bool(self.sessions)
 
     def _drop_session(self, session: _Session) -> None:
+        """丢弃单个会话：只停它自己的线程和连接，不碰其他店铺。"""
         session.close()
-        try:
-            self.sessions.remove(session)
-        except ValueError:
-            pass
-        if not self.sessions:
+        with self._lock:
+            try:
+                self.sessions.remove(session)
+            except ValueError:
+                pass
+            remaining = bool(self.sessions)
+            primary = self.sessions[0].port if self.sessions else None
+        session.worker = None
+        if not remaining:
             self.port = None
+        elif primary:
+            self.port = primary
+        log.info("pddbridge 会话已移除 %s（剩余 %d 个）", session.label(), len(self.sessions))
 
     def _apply_native_recv_config(self) -> None:
         """把探针/转发配置下发给 DLL; 管道未就绪（注入中）时后台重试。"""
@@ -866,45 +1042,67 @@ class PddbridgeSource:
 
         threading.Thread(target=apply, daemon=True, name="pdd-native-cfg").start()
 
+    def _health_check_session(self, session: _Session) -> None:
+        """单店健康探测。跑在会话自己的 worker 里，不和别的店铺抢锁。"""
+        if not pdd_cdp.is_alive(session.port):
+            log.warning("health check failed %s -> 丢弃该会话", session.label())
+            self._drop_session(session)
+            return
+        # socket 存活检查: 钩子活着但工作台未建 IM WebSocket（无打开会话）时
+        # 不会有任何推送, 静默等价于不收消息 —— 必须大声说出来。
+        try:
+            r = self._eval(
+                session,
+                "(function(){var su=window.socketUtil;"
+                "return JSON.stringify({uid:new URLSearchParams(location.search).get('uid')||'',"
+                " st:(su&&su.socket)?(su.socket.readyState==null?'none':su.socket.readyState):'no_socket'});})()",
+                timeout=min(2.0, self._eval_timeout()))
+            info = json.loads(r) if isinstance(r, str) else {}
+            session.socket_state = str(info.get("st") or "unknown")
+            if session.socket_state not in ("1", "open"):
+                # 页面没真 socket 时，实时消息只能靠原生通道；把话说清楚，别让人去猜。
+                hint = ""
+                if session.socket_state in ("none", "no_socket"):
+                    hint = "（页面无 JS socket；实时收消息需开启 recv_via_dll 原生接收）"
+                self._warn_throttled(
+                    "socket_dead:%s" % session.key(),
+                    "工作台聊天 socket 未连接(state=%s uid=%s account=%s): 未打开会话时 PDD 不推送, "
+                    "打开任意买家会话即可恢复接收%s"
+                    % (session.socket_state, info.get("uid", ""), session.account or "?", hint),
+                    interval=120.0)
+        except Exception:
+            session.socket_state = "probe_failed"
+        self._refresh_account_hint(session)
+        session.last_health = time.time()
+        self._last_health = session.last_health
+
     def _health_check(self) -> None:
-        for session in list(self.sessions):
-            if not pdd_cdp.is_alive(session.port):
-                log.warning("health check failed %s -> 丢弃该会话", session.label())
-                self._drop_session(session)
-                continue
-            # socket 存活检查: 钩子活着但工作台未建 IM WebSocket（无打开会话）时
-            # 不会有任何推送, 静默等价于不收消息 —— 必须大声说出来。
-            try:
-                r = session.cdp.eval(
-                    "(function(){var su=window.socketUtil;"
-                    "return JSON.stringify({uid:new URLSearchParams(location.search).get('uid')||'',"
-                    " st:(su&&su.socket)?(su.socket.readyState==null?'none':su.socket.readyState):'no_socket'});})()",
-                    session.cid)
-                info = json.loads(r) if isinstance(r, str) else {}
-                session.socket_state = str(info.get("st") or "unknown")
-                if session.socket_state not in ("1", "open"):
-                    self._warn_throttled(
-                        "socket_dead",
-                        "工作台聊天 socket 未连接(state=%s uid=%s): 未打开会话时 PDD 不推送, "
-                        "打开任意买家会话即可恢复接收" % (session.socket_state, info.get("uid", "")),
-                        interval=120.0)
-            except Exception:
-                session.socket_state = "probe_failed"
-            self._refresh_account_hint(session)
-        self._last_health = time.time()
+        """兼容旧入口：逐个会话探测（现已由各会话 worker 自行驱动）。"""
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            self._health_check_session(session)
 
     def _handle_actions(self) -> bool:
-        """执行投递动作, 返回是否要求重连。"""
+        """把发送/拉历史派发到目标店铺自己的 worker，自己不阻塞。"""
         with self._lock:
             acts, self._act = self._act, []
         reconnect = False
         for name, a in acts:
-            if name == "send":
-                self._do_send_action(*a)
-            elif name == "pull_history":
-                self._do_pull_history(*a)
-            elif name == "reconnect":
+            if name == "reconnect":
                 reconnect = True
+                continue
+            account = str(a[2] if name == "send" else a[1] or "")
+            session = self._session_for_send(account)
+            if session is None:
+                # 没主的动作按旧路径就地执行（发送会返回 blocked，不会串台）
+                if name == "send":
+                    self._do_send_action(*a)
+                elif name == "pull_history":
+                    self._do_pull_history(*a)
+                continue
+            session.actions.put((name, a))
+            self._wake.set()
         return reconnect
 
     def _do_pull_history(self, uid, account, size, begin_msg_id, start_index, pre_msg_id, event) -> None:
@@ -919,7 +1117,7 @@ class PddbridgeSource:
                 "{ok:false,err:'no helper'})"
                 % (uid, size, begin_msg_id, start_index, pre_msg_id))
         try:
-            r = session.cdp.eval(expr, session.cid)
+            r = self._eval(session, expr)
         except Exception as exc:
             event.result = {"ok": False, "status": "failed", "via": "cdp_history", "error": str(exc)}
             event.set()
@@ -973,17 +1171,15 @@ class PddbridgeSource:
         self._set_state(SCANNING)
         fallback_after = max(60.0, float(self.cfg.get("cdp_fallback_after_seconds") or 60))
         poll = float(self.cfg.get("cdp_poll_interval") or 0.2)
-        health = float(self.cfg.get("health_interval") or 5.0)
         rescan = float(self.cfg.get("cdp_rescan_seconds") or 20)
         scan_deadline = time.time() + fallback_after
         next_rescan = 0.0
 
         while not self._stop_evt.is_set():
             if self._handle_actions():
-                self._close_sessions()
-                self._set_state(SCANNING)
-                scan_deadline = time.time() + fallback_after
-                next_rescan = 0.0
+                # 重连：只重新注入现有会话，不再“全关再挂”（20 店时那等于集体断线）
+                for session in list(self.sessions):
+                    self._reinject_session(session)
 
             self._pump_push()
 
@@ -1017,30 +1213,45 @@ class PddbridgeSource:
                     self._wake.clear()
                 continue
 
-            # LISTENING
+            # LISTENING：主循环只做巡检与派发；取帧由各店铺自己的 worker 并行做。
             now = time.time()
             if now >= next_rescan:
                 # 运行时新增账号 / 切店铺后页面重载: 补挂新上下文, 不动已挂的
                 self._scan_and_attach()
                 next_rescan = now + rescan
-            for session in list(self.sessions):
-                if self._pump_session(session) != "ok":
-                    self._drop_session(session)
+            self._reap_dead_sessions()
+            self._ensure_workers()
             if not self.sessions:
                 log.warning("pddbridge 全部会话注入丢失 -> 重新扫描")
                 self._set_state(SCANNING)
                 scan_deadline = time.time() + fallback_after
                 next_rescan = 0.0
                 continue
-            if now - self._last_health > health:
-                self._health_check()
             self._wake.wait(poll)   # 有推送就立刻醒; 没推送就 200ms 轮一次
             self._wake.clear()
 
         self._close_sessions()
 
+    def _reap_dead_sessions(self) -> None:
+        """只清理"调试端口都没了"的会话；单次 eval 超时不算死，交给 worker 退避。"""
+        with self._lock:
+            sessions = list(self.sessions)
+        for session in sessions:
+            if not pdd_cdp.is_alive(session.port):
+                log.warning("health check failed %s -> 丢弃该会话", session.label())
+                self._drop_session(session)
+
     # ---------------- 帧处理 ----------------
     def _handle_frame(self, e: dict, session: _Session | None = None) -> None:
+        """帧入口：多店并行后（每店一个 worker），帧处理必须串行。
+
+        解析/去重/待确认表都不是线程安全的，且一条帧里可能触发发送回执确认；
+        用一把粗粒度锁即可（每帧只做纯 CPU 工作，不阻塞 IO）。
+        """
+        with self._frame_lock:
+            self._handle_frame_locked(e, session)
+
+    def _handle_frame_locked(self, e: dict, session: _Session | None = None) -> None:
         hint = session.account if session is not None else ""
         if e.get("dir") == "send_error":
             key = "%s|%s" % (str(e.get("uid") or ""), str(e.get("content") or "")[:48])
@@ -1120,10 +1331,11 @@ class PddbridgeSource:
         if session is None:
             return
         try:
-            info = session.cdp.eval(
+            info = self._eval(
+                session,
                 "(function(){var i=window.__pddBridge_info ? window.__pddBridge_info() : null;"
                 "if(i)i.sendTextReady=!!(window.socketUtil && typeof window.socketUtil.sendMsg==='function'"
-                " && typeof window.__pddBridge_sendText==='function');return i;})()", session.cid
+                " && typeof window.__pddBridge_sendText==='function');return i;})()"
             )
         except Exception:
             return
@@ -1328,7 +1540,7 @@ class PddbridgeSource:
             return
         # 防串台: 该会话页面的 globalMallId 与目标 account 的 mall 比对
         try:
-            info = session.cdp.eval("window.__pddBridge_info ? window.__pddBridge_info() : null", session.cid)
+            info = self._eval(session, "window.__pddBridge_info ? window.__pddBridge_info() : null")
         except Exception as exc:
             log.warning("__pddBridge_info error: %s", exc)
             info = None
@@ -1368,7 +1580,7 @@ class PddbridgeSource:
                 "deadline": time.time() + timeout, "account": str(account or ""),
             }
         try:
-            r = session.cdp.eval(expr, session.cid)
+            r = self._eval(session, expr)
         except Exception as exc:
             log.warning("sendText eval error: %s", exc)
             r = None

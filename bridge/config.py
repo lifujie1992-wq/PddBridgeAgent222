@@ -263,6 +263,11 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "cdp_fallback_after_seconds": float(data.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": data.get("cdp_port"),
         "cdp_poll_interval": float(data.get("cdp_poll_interval") or 0.2),
+        # 单次 CDP eval 超时（默认 3s）与每店健康探测间隔（默认 30s）。
+        # 20 店时 8s 超时会连锁拖死整片；探测也不能和取帧抢连接。
+        "cdp_eval_timeout_seconds": float(data.get("cdp_eval_timeout_seconds") or 3.0),
+        "cdp_health_interval_seconds": float(data.get("cdp_health_interval_seconds") or 30.0),
+        "cdp_session_backoff_max_seconds": float(data.get("cdp_session_backoff_max_seconds") or 30.0),
         "cdp_rescan_seconds": float(data.get("cdp_rescan_seconds") or 20),
         "cdp_emit_history": bool(data.get("cdp_emit_history", False)),
         # 可选：走注入 DLL 直发（需先注入, 未就绪自动回退 CDP）。默认关。
@@ -340,6 +345,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "cdp_fallback_after_seconds": float(cfg.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": cfg.get("cdp_port"),
         "cdp_poll_interval": float(cfg.get("cdp_poll_interval") or 0.2),
+        "cdp_eval_timeout_seconds": float(cfg.get("cdp_eval_timeout_seconds") or 3.0),
+        "cdp_health_interval_seconds": float(cfg.get("cdp_health_interval_seconds") or 30.0),
+        "cdp_session_backoff_max_seconds": float(cfg.get("cdp_session_backoff_max_seconds") or 30.0),
         "cdp_emit_history": bool(cfg.get("cdp_emit_history", False)),
         "send_via_dll": bool(cfg.get("send_via_dll", False)),
         "pdd_dll_path": str(cfg.get("pdd_dll_path") or ""),
@@ -412,6 +420,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "cdp_fallback_after_seconds": 60,
         "cdp_port": None,
         "cdp_poll_interval": 0.2,
+        "cdp_eval_timeout_seconds": 3.0,
+        "cdp_health_interval_seconds": 30.0,
+        "cdp_session_backoff_max_seconds": 30.0,
         "cdp_emit_history": False,
         "cdp_rescan_seconds": 20,
         # 原生接收（0.7.7+）：默认关；打开前必须先用 PROBE 探针确认 recv_slot。

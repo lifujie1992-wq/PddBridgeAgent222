@@ -255,3 +255,43 @@ spool 帧数        : 17
 
 预期：开机/切店后 `history pull` 周期回到 15 秒量级、抓取延迟 ≤15 秒、上报门槛 0 秒 →
 端到端 15–20 秒；`recv_via_dll` 生效后新消息直接 0–1 秒。
+
+---
+
+# 附录 C：0.7.9.0 逐店隔离（20 店的命门）
+
+客户固定 20 个店铺同时在线。旧实现主循环里 `for session: _pump_session(session)` 串行 eval，
+任何一店卡到 8 秒就把其余 19 家全部冻住，且一次失败直接 `_drop_session`（不重试）——
+现场 15 个账号时连锁 `cdp eval 无响应`、2 分钟掉到 2 个账号，就是这个原因。
+
+## C.1 已改
+
+| 位置 | 改动 |
+|---|---|
+| `_Session` | 新增 `lock`（一条 CDP 连接同一时刻只给一个调用者）、`actions`（该店动作队列）、`worker/failures/next_attempt/next_health/last_frame_at` |
+| `_eval()` | 所有 CDP 调用统一走会话锁 + `cdp_eval_timeout_seconds`（默认 **3s**，原来硬编码 8s） |
+| `_session_worker()` | **每店一个 poller 线程**：取帧、执行该店的发送/拉历史、独立健康探测 |
+| 失败处理 | 改 `_note_session_failure()` 指数退避 1→2→4→…→`cdp_session_backoff_max_seconds`(30s)；**不再丢弃会话**，只有"调试端口没了"才移除（`_reap_dead_sessions`） |
+| 重注入 | `_reinject_session()` 只重注入出问题的那一家，失败退避，不再 `_close_sessions()` 全关 |
+| 动作派发 | `_handle_actions()` 把发送/拉历史投到目标店铺队列，主循环不再被 `pull_history` 阻塞；超时的发送会从队列撤回（`_cancel_dispatched_send`） |
+| 帧处理 | `_handle_frame()` 加 `_frame_lock`：多店并行后去重表/待确认表仍需串行 |
+| 健康探测 | 由每店 worker 自己每 `cdp_health_interval_seconds`（默认 30s）做一次，超时 2s；不再与取帧抢同一条连接 |
+| 重扫 | `find_socketutil_sessions(port, skip_ids=...)` 跳过已挂 target —— 20 店时一次重扫从"20 条连接 + 最多 60 秒"降到毫秒级 |
+| 配置 | 新增 `cdp_eval_timeout_seconds` / `cdp_health_interval_seconds` / `cdp_session_backoff_max_seconds` |
+
+## C.2 验证
+
+`tests/test_pdd_session_isolation.py` 5 条 + 原有用例，共 **19/19** 通过：
+
+- `test_eval_uses_configured_timeout_and_serializes`：同一连接 3 线程并发调用只串行执行，超时=3s
+- `test_actions_are_dispatched_to_the_matching_shop_only`：发送/拉历史各自进对的店
+- `test_single_shop_failure_backs_off_and_spares_the_others`：1→2→4→8（封顶按配置），另一店完全不受影响
+- `test_drop_session_removes_only_that_shop`：只关自己的连接
+- `test_frame_handling_is_serialized_across_shops`：5 线程并发投帧不重叠
+
+## C.3 20 店的预期行为
+
+- 一店页面卡顿：只有该店退避，其余 19 家照常收发；
+- 一店页面重载：只重注入该店，其余不受影响；
+- 一店 `eval` 超时：3 秒结束、退避重试，不再引发整片 `cdp drain error`；
+- 每店 `frames/min`、`last_frame_at`、`failures` 可在 status 里看到，哪家店死了直接定位。
