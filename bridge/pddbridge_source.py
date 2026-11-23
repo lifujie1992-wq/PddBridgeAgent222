@@ -731,10 +731,22 @@ class PddbridgeSource:
             self._warn_throttled("raw_archive", "原始帧归档写入失败: %s" % exc)
 
     # ---------------- 帧入口 ----------------
-    def feed_native_frame(self, raw: str) -> None:
-        """原生 DLL 通道的 push 帧（v0.7）：与注入脚本的 entry 同构，复用帧处理管线。"""
-        self._handle_frame({"dir": "in", "data": raw, "t": int(time.time() * 1000),
-                            "chan": "native"})
+    def feed_native_frame(self, raw) -> None:
+        """原生 DLL 通道的 push 帧：拆信封后与注入脚本的 entry 同构，复用同一条帧管线。
+
+        工作台原生回调发的是 ``{"push_type":2,"push_data":{"data":[{"message":...}]}}``
+        这种信封，一次推送可能带多条消息；这里逐条拆成 ``{"cmd":"push",...}``。
+        已经是页面帧形状的直接放行，认不出的按诊断帧上报（不静默丢）。
+        """
+        from .pddbridge.protocol import native_push_messages
+
+        frames = native_push_messages(raw)
+        stamp = int(time.time() * 1000)
+        if not frames:
+            self._handle_frame({"dir": "in", "data": raw, "t": stamp, "chan": "native"})
+            return
+        for frame in frames:
+            self._handle_frame({"dir": "in", "data": frame, "t": stamp, "chan": "native"})
 
     # ---------------- 扫描/注入 ----------------
     def _try_recover(self) -> bool:

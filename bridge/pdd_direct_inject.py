@@ -27,9 +27,14 @@ DEFAULT_INJECTOR = r"D:\temp\pdd-send-hook\out\injector.exe"
 WORKBENCH_EXE = "pddworkbench.exe"
 
 
-def resolve_tool(value: str | None, filename: str, dev_default: str) -> str:
+def resolve_tool(value: str | None, filename: str, dev_default: str,
+                 alternates: tuple[str, ...] = ()) -> str:
     """解析 DLL/注入器路径：配置值存在则用；冻结安装用 exe 同目录；
-    都没有才回退开发机默认路径。客户机装包后无需改配置。"""
+    都没有才回退开发机默认路径。客户机装包后无需改配置。
+
+    alternates：同目录下的备选文件名。原生接收只在 pdd_send_v5.dll 里（v3 无 recv 管道），
+    安装包里可能叫 v5 而老配置写的是 v3，所以两种都要找。
+    """
     from pathlib import Path
     import sys
     if value:
@@ -38,13 +43,16 @@ def resolve_tool(value: str | None, filename: str, dev_default: str) -> str:
                 return value
         except OSError:
             pass
-    candidates = []
+    names = (filename, *alternates)
+    roots = []
     if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / filename)
-    candidates.append(Path(__file__).resolve().parent.parent / filename)
-    for cand in candidates:
-        if cand.exists():
-            return str(cand)
+        roots.append(Path(sys.executable).resolve().parent)
+    roots.append(Path(__file__).resolve().parent.parent)
+    for root in roots:
+        for name in names:
+            cand = root / name
+            if cand.exists():
+                return str(cand)
     return value or dev_default
 
 
@@ -155,7 +163,8 @@ def ensure_injected(cfg: dict | None = None, *, wait_ready_s: float = 12.0) -> b
     """确保工作台已注入且直发就绪。返回是否就绪。"""
     cfg = cfg or {}
     pipe = str(cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
+                       alternates=("pdd_send_v3.dll",))
     injector = resolve_tool(cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
     dll_name = Path(dll).name
 
@@ -205,7 +214,8 @@ class InjectWatcher(threading.Thread):
 
     def run(self) -> None:
         pipe = str(self.cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
+                           alternates=("pdd_send_v3.dll",))
         injector = resolve_tool(self.cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
         dll_name = Path(dll).name
         while not self._stop_evt.wait(self.interval):

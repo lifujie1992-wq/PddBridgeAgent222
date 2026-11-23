@@ -268,6 +268,11 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "recv_via_dll": bool(data.get("recv_via_dll", False)),
         "recv_slot": int(data.get("recv_slot") or -1),
         "recv_mode": int(data.get("recv_mode") or 0),
+        # 接收管道名后缀（对应 DLL 侧 PDD_BRIDGE_PIPE_SUFFIX，空=默认管道）。
+        # 一台机器跑多个安装/多个工作台时用它隔离，否则会抢同一条管道。
+        "recv_pipe_suffix": str(data.get("recv_pipe_suffix") or ""),
+        "recv_pipe_name": str(data.get("recv_pipe_name") or ""),
+        "recv_ack_pipe_name": str(data.get("recv_ack_pipe_name") or ""),
     }
     if not out["agent_id"]:
         out["agent_id"] = (
@@ -322,6 +327,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "recv_via_dll": bool(cfg.get("recv_via_dll", False)),
         "recv_slot": int(cfg.get("recv_slot") or -1),
         "recv_mode": int(cfg.get("recv_mode") or 0),
+        "recv_pipe_suffix": str(cfg.get("recv_pipe_suffix") or ""),
+        "recv_pipe_name": str(cfg.get("recv_pipe_name") or ""),
+        "recv_ack_pipe_name": str(cfg.get("recv_ack_pipe_name") or ""),
     }
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     # utf-8 without BOM (PowerShell UTF8 encoding often adds BOM and breaks json.loads)
@@ -383,6 +391,15 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "cdp_poll_interval": 0.2,
         "cdp_emit_history": False,
         "cdp_rescan_seconds": 20,
+        # 原生接收（0.7.7+）：默认关；打开前必须先用 PROBE 探针确认 recv_slot。
+        "recv_via_dll": False,
+        "recv_slot": -1,
+        "recv_mode": 0,
+        "recv_pipe_suffix": "",
+        "recv_pipe_name": "",
+        "recv_ack_pipe_name": "",
+        "pdd_dll_path": "",
+        "pdd_injector_path": "",
     }
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     if not cfg_path.exists():

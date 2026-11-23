@@ -182,3 +182,62 @@ def messages_from_list(parsed):
             "raw": m,
         })
     return out
+
+
+# ---------------- 原生（注入 DLL）push 帧适配 ----------------
+# 工作台原生回调吐出来的不是页面 socketUtil 那种 {"cmd":"push",...}，
+# 而是下面这个信封（3.5.x 实测）：
+#   {"push_type":2,
+#    "push_data":{"seq_type":1,"seq_id":977,"base_seq_id":976,
+#                 "data":[{"message":{"from":{...},"to":{...},"msg_id":"...","ts":"1789769315",...},
+#                          "chat_type_id":1}]},
+#    "target_id":164945148,"custom_data":{...}}
+# 每次 push 的 data 是**数组**（同一次推送可能带多条消息），必须逐条拆开；
+# 漏掉这层会退化成"整个推送算一条"，或者被 parse_frame 判成 unparsable。
+def native_push_messages(raw):
+    """原生 push 帧 -> [页面同构帧 dict, ...]。
+
+    已经是 ``{"cmd"/"response": "push", ...}`` 形状的帧原样返回（一条），
+    认不出的返回 ``[]``，由调用方按诊断帧处理。
+    """
+    if isinstance(raw, dict):
+        obj = raw
+    else:
+        try:
+            obj = json.loads(raw)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return []
+    if not isinstance(obj, dict):
+        return []
+    if obj.get("cmd") or obj.get("response"):
+        return [obj]
+    payload = obj.get("push_data")
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("data")
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return []
+    target_id = obj.get("target_id") or payload.get("target_id") or ""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("message")
+        if not isinstance(message, dict):
+            # 少数帧把 message 字段平铺在 item 上
+            if "msg_id" in item or "content" in item:
+                message = item
+            else:
+                continue
+        frame = {"cmd": "push", "message": message, "push_type": obj.get("push_type")}
+        if target_id:
+            frame["target_id"] = target_id
+        for key in ("seq_type", "seq_id", "base_seq_id"):
+            if payload.get(key) is not None:
+                frame[key] = payload[key]
+        if item.get("chat_type_id") is not None:
+            frame["chat_type_id"] = item["chat_type_id"]
+        out.append(frame)
+    return out
