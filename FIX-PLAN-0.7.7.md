@@ -295,3 +295,56 @@ spool 帧数        : 17
 - 一店页面重载：只重注入该店，其余不受影响；
 - 一店 `eval` 超时：3 秒结束、退避重试，不再引发整片 `cdp drain error`；
 - 每店 `frames/min`、`last_frame_at`、`failures` 可在 status 里看到，哪家店死了直接定位。
+
+---
+
+# 附录 D：0.7.10.0 催付闸门（没买就催，买了绝不催）
+
+## D.1 业务口径
+
+客户明确要求：**只要这个人还没买，就允许催；买了就绝对不催**。
+所以判定不是"是不是待付款"，而是"**窗口内有没有已支付的订单**"。
+
+| 查到的情况 | state | 允许催 |
+|---|---|---|
+| 有已支付订单 | `paid` | ❌ 绝不 |
+| 有单但未支付 | `unpaid` | ✅ |
+| 最新单付款前关闭/取消 | `closed` | ✅（等于没买）|
+| 该买家在这家店没有订单 | `no_order` | ✅ |
+| 查不到（面板没就绪/超时/接口失败）| `unknown` | 默认 ❌（`order_gate_fail_open` 可放开）|
+| 窗口外的历史已付订单 | 视为 `no_order` | ✅（窗口 `order_gate_window_seconds`，默认 24h）|
+
+## D.2 实现
+
+| 位置 | 改动 |
+|---|---|
+| `bridge/pdd_context.py` | 新增 `order_verdict()` / `order_gate_decision()`：只复用已有的 `/latitude/order/userAllOrder` 查询结果，纯函数、可单测 |
+| `bridge/agent.py` | 发送前闸门 `_order_gate()`：`require_order_state` 写在命令上（推荐）或 `order_gate_state` 全局开；拦截时返回 `status=blocked, via=order_gate, order_state/order_id/order_age_seconds`，**一条都不发** |
+| `bridge/agent.py` | 抽出 `_finalize_command()`：闸门拦截和真正发送走同一条"存结果 + 回报中心"收尾路径 |
+| `bridge/config.py` | `order_gate_state` / `order_gate_window_seconds`(86400) / `order_gate_fail_open`(false)，写进 save_config |
+
+默认全关，`order_gate_state=""` 时行为与 0.7.9.0 完全一致。
+
+## D.3 大脑侧要改的（一行）
+
+催付命令带上：
+
+```jsonc
+{ "type": "send_text", "buyer_id": "...", "account": "...", "content": "亲，您的订单还未支付…",
+  "require_order_state": "not_paid" }
+```
+
+被拦时收到：
+
+```jsonc
+{ "ok": false, "status": "blocked", "via": "order_gate",
+  "error": "order_gate:already_paid", "order_state": "paid",
+  "order_id": "2501...", "order_age_seconds": 96.0,
+  "error_user": "买家已付款，跳过催付" }
+```
+
+## D.4 验证
+
+`tests/test_order_gate.py` 8 条 + 原有 19 条 = **27/27 通过**：
+已付款拦截（含 pay_status 各种表示）、未付款/已关闭/无单放行、多单以"有已付即拦"为准、
+查询失败默认 fail-closed、窗口排除历史旧单、闸门关闭时完全放行。

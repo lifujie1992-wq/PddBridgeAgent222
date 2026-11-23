@@ -1110,6 +1110,12 @@ class BridgeAgent:
                     "via": "blocked",
                 }
             else:
+                # 催付/跟进类命令：发之前先查「这个人买了没有」。
+                # 客户口径：没买（无单/未付款/已关闭）都可催，只有已支付才拦。
+                gate = self._order_gate(cmd, account, buyer_id)
+                if gate is not None:
+                    self._finalize_command(command_id, cmd, gate)
+                    continue
                 # 先登记“本桥接（AI）要发的这条”：探域日志常常在 send_text 返回之前
                 # 就已经回显了这条消息，等发送结果回来再登记就晚了（人工会被当成智能体）。
                 self._note_self_send(account, buyer_id, content)
@@ -1150,21 +1156,79 @@ class BridgeAgent:
                          str((result or {}).get("via") or "") if isinstance(result, dict) else "")
             if not isinstance(result, dict):
                 result = {"ok": bool(result), "raw_result": str(result or "")}
-            else:
-                result = dict(result)
-            result = _command_result_for_ack(result)
-            result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
-            if not self.command_journal.store_result(command_id, result):
-                self._last_error = self.command_journal.last_error
-                log.error("command %s result journal write failed: %s", command_id,
-                          self.command_journal.last_error)
-            self._report_command_result(command_id, result)
+            self._finalize_command(command_id, cmd, result)
+
+    def _finalize_command(self, command_id: str, cmd: dict, result: dict) -> None:
+        """存结果 + 回报中心（闸门拦截和真正发送走同一条收尾路径）。"""
+        result = dict(result)
+        result = _command_result_for_ack(result)
+        result.setdefault("command_lease_token", str(cmd.get("lease_token") or ""))
+        if not self.command_journal.store_result(command_id, result):
+            self._last_error = self.command_journal.last_error
+            log.error("command %s result journal write failed: %s", command_id,
+                      self.command_journal.last_error)
+        self._report_command_result(command_id, result)
 
     def _self_send_buffer(self) -> Deque[dict]:
         buf = getattr(self, "_self_sends", None)
         if buf is None:
             buf = self._self_sends = deque(maxlen=400)
         return buf
+
+    def _order_lookup(self):
+        """懒初始化订单查询器（与消息入线那套共用逻辑：面板定位/结果缓存/超时预算）。"""
+        lookup = getattr(self, "_pdd_order_lookup", None)
+        if lookup is not None:
+            return lookup
+        try:
+            from .pdd_context import PddOrderContextLookup
+
+            budget = max(0.4, min(3.0, float(self.cfg.get("pdd_context_timeout_seconds") or 1.8)))
+            cache = max(0.0, float(self.cfg.get("pdd_context_cache_seconds") or 25.0))
+            lookup = PddOrderContextLookup(timeout=budget, cache_seconds=cache)
+        except Exception as exc:
+            log.warning("订单闸门初始化失败（不启用）: %s", exc)
+            lookup = False
+        self._pdd_order_lookup = lookup
+        return lookup
+
+    def _order_gate(self, cmd: dict, account: str, buyer_id: str) -> dict | None:
+        """发送前的订单闸门：按客户口径只看「付没付」。返回 None = 放行。
+
+        ``require_order_state`` 可写在命令上（推荐），也可用配置 ``order_gate_state``
+        全局打开；``not_paid`` = 「没买就放行」，只有已支付才拦。
+        """
+        mode = str(cmd.get("require_order_state") or self.cfg.get("order_gate_state") or "").strip().lower()
+        if mode in {"", "off", "none"}:
+            return None
+        lookup = self._order_lookup()
+        if lookup is False or lookup is None:
+            return None
+        try:
+            window = float(cmd.get("order_window_seconds")
+                           or self.cfg.get("order_gate_window_seconds") or 86400.0)
+        except (TypeError, ValueError):
+            window = 86400.0
+        from .pdd_context import order_gate_decision, order_verdict
+
+        raw = lookup.lookup({"account": account, "buyer_id": buyer_id})
+        verdict = order_verdict(raw, window_seconds=window)
+        fail_open = bool(self.cfg.get("order_gate_fail_open", False))
+        allowed, reason = order_gate_decision(verdict, mode, fail_open)
+        log.info("order gate buyer=%s account=%s state=%s allowed=%s reason=%s",
+                 buyer_id, account, verdict.get("state"), allowed, reason)
+        if allowed:
+            return None
+        return {
+            "ok": False, "status": "blocked", "real_send": False,
+            "retryable": False, "via": "order_gate",
+            "error": "order_gate:%s" % reason,
+            "order_state": verdict.get("state"),
+            "order_id": verdict.get("order_id") or "",
+            "order_age_seconds": verdict.get("age_seconds"),
+            "error_user": ("买家已付款，跳过催付" if verdict.get("state") == "paid"
+                           else "订单状态无法确认，已跳过（避免误催付）"),
+        }
 
     def _note_self_send(self, account: str, buyer_id: str, content: str) -> None:
         """记下「本桥接（中心指令 / AI）刚发出去」的一条消息，供本地工作台区分智能体/人工。"""

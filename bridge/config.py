@@ -217,6 +217,9 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "history_report_max_age_seconds": float(data.get("history_report_max_age_seconds") or 1800),
         # 历史/回扫事件等多久才上送。legacy=90s（兼容不认 is_history 的老中心）；
         # ack_capable=0s（中心自己按 is_history 决定回不回，不必再压 90 秒）。
+        "order_gate_state": str(data.get("order_gate_state") or ""),
+        "order_gate_window_seconds": float(data.get("order_gate_window_seconds") or 86400.0),
+        "order_gate_fail_open": bool(data.get("order_gate_fail_open", False)),
         "history_hold_policy": str(data.get("history_hold_policy") or "legacy"),
         "history_live_window_seconds": float(
             data["history_live_window_seconds"]
@@ -323,6 +326,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "history_pull_timeout_seconds": float(cfg.get("history_pull_timeout_seconds") or 3.0),
         "history_report_max_age_seconds": float(cfg.get("history_report_max_age_seconds") or 1800),
         "history_report_user_only": bool(cfg.get("history_report_user_only", True)),
+        "order_gate_state": str(cfg.get("order_gate_state") or ""),
+        "order_gate_window_seconds": float(cfg.get("order_gate_window_seconds") or 86400.0),
+        "order_gate_fail_open": bool(cfg.get("order_gate_fail_open", False)),
         "history_hold_policy": str(cfg.get("history_hold_policy") or "legacy"),
         "history_live_window_seconds": float(
             cfg["history_live_window_seconds"]
@@ -394,6 +400,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "history_pull_timeout_seconds": 3.0,
         "history_report_max_age_seconds": 1800,
         "history_report_user_only": True,
+        "order_gate_state": "",
+        "order_gate_window_seconds": 86400,
+        "order_gate_fail_open": False,
         "history_hold_policy": "legacy",
         "history_live_window_seconds": 90,
         "send_confirm_timeout_seconds": 10.0,

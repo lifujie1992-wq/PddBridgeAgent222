@@ -507,3 +507,129 @@ return window.__pddBridgeQuery(buyerId);
         with self._lock:
             self._target_cache.pop(mall_id, None)
         return _failure("lookup_failed" if saw_matching_panel else "mall_panel_not_found")
+
+
+# ---------------- 催付闸门：只看「付没付」，不看「是不是待付款」 ----------------
+# 业务口径（客户明确要求）：只要这个人还没买，就允许催；买了就绝对不催。
+# 所以这里只做一件事：判断窗口内**有没有已支付的订单**。没付款、已关闭、压根没下单，
+# 一律放行（这才是「没买就催」），只有已支付才拦。
+_PAID_FLAGS = {"1", "2", "true", "paid", "yes", "已付款", "已支付", "支付成功"}
+_CLOSED_TEXT = ("关闭", "取消", "已关闭", "交易关闭")
+
+
+def _as_flag(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip().lower()
+
+
+def _paid(order: dict) -> bool:
+    """这一单是否已经付过钱。
+
+    pay_status 是主依据（0=未支付）；平台若只回文本状态，用 order_status 兜底。
+    """
+    if _as_flag(order.get("pay_status")) in _PAID_FLAGS:
+        return True
+    status = str(order.get("order_status") or "").strip()
+    if not status:
+        return False
+    if any(word in status for word in _CLOSED_TEXT):
+        return False
+    return status in {"已付款", "已支付", "待发货", "待收货", "已发货", "已签收", "已完成", "部分发货"}
+
+
+def order_verdict(result: dict, *, now: float | None = None,
+                  window_seconds: float = 86400.0) -> dict:
+    """把订单查询结果折算成「能不能催」。
+
+    返回 ``{state, bought, allowed, reason, order_id, age_seconds, pay_status}``：
+
+    ==========  =========================================  ======
+    state      含义                                        allowed
+    ==========  =========================================  ======
+    paid       窗口内有已支付订单（买了）                  False
+    closed     最新单是付款前关闭/取消（等于没买）          True
+    unpaid     有单但未支付（待付款）                       True
+    no_order   该买家在这家店没有订单                       True
+    unknown    查不到（面板没就绪/超时/接口失败）           fail_open?
+    ==========  =========================================  ======
+    """
+    now = time.time() if now is None else float(now)
+    verdict = {"state": "unknown", "bought": False, "allowed": False,
+               "reason": "", "order_id": "", "age_seconds": None, "pay_status": None}
+    if not isinstance(result, dict) or not result.get("ok"):
+        verdict["reason"] = "lookup_failed:%s" % (
+            (result or {}).get("reason") or (result or {}).get("error") or "unknown")
+        return verdict
+
+    orders = [row for row in (result.get("orders") or []) if isinstance(row, dict)]
+    if not orders:
+        verdict.update(state="no_order", allowed=True, reason="no_order")
+        return verdict
+
+    def _age(order):
+        try:
+            created = float(order.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created = 0.0
+        if created > 100_000_000_000:      # 毫秒
+            created /= 1000.0
+        return (now - created) if created > 0 else None
+
+    def _created(order):
+        value = _age(order)
+        return float("inf") if value is None else value
+
+    window = float(window_seconds or 0)
+    if window > 0:
+        in_window = [o for o in orders if _age(o) is None or _age(o) <= window]
+        if not in_window:
+            # 窗口外的历史单不算「这次买了」——但也不能拿它当没买去催，
+            # 交回业务判断：当作无单处理（催是允许的），并在 reason 里写明。
+            verdict.update(state="no_order", allowed=True, reason="no_order_in_window")
+            return verdict
+        orders = in_window
+
+    latest = sorted(orders, key=_created)[0]
+    age = _age(latest)
+    base = {"order_id": str(latest.get("order_id") or ""), "age_seconds": age,
+            "pay_status": latest.get("pay_status")}
+
+    paid_orders = [o for o in orders if _paid(o)]
+    if paid_orders:
+        paid_order = sorted(paid_orders, key=_created)[0]
+        paid_age = _age(paid_order)
+        verdict.update(state="paid", bought=True, allowed=False, reason="already_paid",
+                       order_id=str(paid_order.get("order_id") or ""), age_seconds=paid_age,
+                       pay_status=paid_order.get("pay_status"))
+        return verdict
+
+    status_text = str(latest.get("order_status") or "")
+    if status_text in {"2", "2.0"} and _as_flag(latest.get("pay_status")) in {"0", "0.0", ""}:
+        verdict.update(base, state="closed", allowed=True, reason="order_closed_unpaid")
+        return verdict
+    if any(word in status_text for word in _CLOSED_TEXT):
+        verdict.update(base, state="closed", allowed=True, reason="order_closed_unpaid")
+        return verdict
+    verdict.update(base, state="unpaid", allowed=True, reason="order_unpaid")
+    return verdict
+
+
+def order_gate_decision(verdict: dict, mode: str = "not_paid",
+                        fail_open: bool = False) -> tuple[bool, str]:
+    """闸门判定：``not_paid`` = 「没买就放行」。返回 (是否允许发送, 原因)。"""
+    mode = str(mode or "").strip().lower()
+    state = str((verdict or {}).get("state") or "unknown")
+    reason = str((verdict or {}).get("reason") or state)
+    if state == "unknown":
+        return (bool(fail_open), "order_unknown" if fail_open else "order_unknown_blocked")
+    if mode in {"", "off", "none", "any"}:
+        return True, "gate_off"
+    if mode == "paid_only":          # 保留旧口径（仅待付款可催）
+        return state == "unpaid", reason
+    # 默认 not_paid：只有已支付才拦
+    if state == "paid":
+        return False, "already_paid"
+    return True, reason
