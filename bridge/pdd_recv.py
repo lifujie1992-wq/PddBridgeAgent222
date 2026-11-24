@@ -117,6 +117,24 @@ class NativeReceiver:
         self._command(f"RECV_MODE|{mode}")
         return self._command("RECV_ON")
 
+    def configure_auto(self) -> str:
+        """全槽位嗅探模式：不需要知道具体槽位号。
+
+        实测（PDD 3.5.0.40）序列必须是这样：
+          1. ``RECV_UNHOOK`` + ``RECV_MSGSdk_ON|0`` —— 否则 ``RECV_ON`` 里
+             导出钩子会成功并**直接跳过** vtable 注册（`hrc==0 → 不调 recv_register`）；
+          2. ``RECV_SLOT|-1`` + ``RECV_AUTO|1`` —— 32 个槽位都嗅探，
+             只放行形似 push 的 JSON（`recv_looks_like_push`）；
+          3. ``RECV_ON`` —— 注册假 VIMsgCallBack。
+        这条路径不写 probe 日志，所以不会踩 ”g_log_lock 未初始化“ 那个崩溃。
+        """
+        self._command("RECV_UNHOOK")
+        self._command("RECV_MSGSdk_ON|0")
+        self._command("RECV_SLOT|-1")
+        self._command(f"RECV_MODE|{int(self.cfg.get('recv_mode') or 0)}")
+        self._command("RECV_AUTO|1")
+        return self._command("RECV_ON")
+
     def hook_install(self) -> str:
         """安装导出 detour（`NotifyWSMessage` / `CheckWSMsg`）。
 

@@ -833,6 +833,26 @@ class PddbridgeSource:
             log.warning("pddbridge 推送队列满, 丢 %d 条 (页面缓冲会兜底)", delta)
 
     # ---------------- 去重（按平台 msg_id；dedup_mode=off 时完全关掉，交给中心判） ----------------
+    def _dedup_window(self) -> float:
+        """msg_id 去重窗口（秒）。
+
+        旧实现在这里写死 120 秒，而回扫窗口是 `history_report_max_age_seconds`（1800 秒）：
+        同一条消息 2 分钟后就不再算“见过”，于是回扫每轮都会再上报一次（实测 8 分钟前的
+        AI 回复被当新消息重传）。中心若按消息触发回复，就会重复应答。
+        取两者最大值，并允许显式配置。
+        """
+        try:
+            explicit = self.cfg.get("dedup_window_seconds")
+            if explicit is not None:
+                return max(0.0, float(explicit))
+        except (TypeError, ValueError):
+            pass
+        try:
+            history = float(self.cfg.get("history_report_max_age_seconds") or 1800.0)
+        except (TypeError, ValueError):
+            history = 1800.0
+        return max(300.0, history)
+
     def _dedup(self, kind: str, msg_id) -> bool:
         if self.dedup_off or not msg_id:
             return False
@@ -842,12 +862,14 @@ class PddbridgeSource:
             # 绝不能拿它当去重依据(否则会误杀真实消息)。
             return False
         now = time.time()
+        window = self._dedup_window()
         key = (kind, key_str)
         last = self._seen.get(key)
-        if last is not None and now - last < 120:
+        if last is not None and now - last < window:
             self._seen[key] = now
             return True
         self._seen[key] = now
+        self._trim_seen()
         return False
 
     def _forget_frame(self, entry: dict) -> None:
@@ -861,6 +883,21 @@ class PddbridgeSource:
         except Exception:
             pass
 
+    def _trim_seen(self) -> None:
+        """去重表不能无限涨（长跑 20 店一天几万条）：超量就清掉最旧的。"""
+        cap = 50000
+        if len(self._seen) <= cap and len(self._seen_any) <= cap:
+            return
+        window = self._dedup_window()
+        now = time.time()
+        for table in (self._seen, self._seen_any):
+            if len(table) <= cap:
+                continue
+            for key in [k for k, ts in table.items() if now - ts > window]:
+                table.pop(key, None)
+            while len(table) > cap:
+                table.pop(next(iter(table)), None)
+
     def _seen_before(self, msg_id) -> bool:
         if self.dedup_off or not msg_id:
             return False
@@ -869,9 +906,10 @@ class PddbridgeSource:
             return False
         now = time.time()
         last = self._seen_any.get(key_str)
-        if last is not None and now - last < 120:
+        if last is not None and now - last < self._dedup_window():
             return True
         self._seen_any[key_str] = now
+        self._trim_seen()
         return False
 
     # ---------------- 原始帧归档（“全部上报”的安全网：任何帧都会落一份本地副本） ----------------
@@ -1051,6 +1089,7 @@ class PddbridgeSource:
         def apply() -> None:
             probe_path = Path(str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl"))
             probe_path = probe_path.with_name("pdd_recv_probe.log")
+            mode = str(self.cfg.get("recv_engine") or "auto").strip().lower()
             for _ in range(6):
                 if self._stop_evt.is_set():
                     return
@@ -1062,10 +1101,15 @@ class PddbridgeSource:
                     reply = recv.probe(str(probe_path))
                     ok = reply and not reply.startswith("pipe_")
                     what = "探针（注意：3.5.0.40 会崩，仅排障用）"
-                else:
+                elif mode == "detour":
                     reply = recv.hook_install()
                     ok = bool(reply) and "hook=0" in reply
-                    what = "导出 detour"
+                    what = "导出 detour（只收心跳/出口帧）"
+                else:
+                    # 默认：全槽位嗅探，进程级覆盖全部店铺/会话
+                    reply = recv.configure_auto()
+                    ok = bool(reply) and "reg=1" in reply
+                    what = "全槽位嗅探（进程级）"
                 if ok:
                     recv._native_cfg_done = True
                     log.info("原生接收已启动（%s）: %s", what, reply)
@@ -1330,6 +1374,14 @@ class PddbridgeSource:
             msg = self._normalize_message(bm, history=history_flag, account_hint=hint)
             if msg and not self._seen_before(msg.get("msg_id")):
                 self.msg_count += 1
+                # 标记真实采集通道：原生（进程级，覆盖全部会话）/ 页面注入（仅当前会话）。
+                # 两条都在时以先到的为准，后到的按 msg_id 去重，日志里能直接看出谁接住的。
+                if e.get("chan") == "native":
+                    msg["source"] = "pdd_native"
+                    msg["capture_source"] = "pdd_native"
+                    self.reported["native_msg"] = self.reported.get("native_msg", 0) + 1
+                elif str(e.get("chan") or "").startswith("page"):
+                    self.reported["page_msg"] = self.reported.get("page_msg", 0) + 1
                 msg["captured_at_ms"] = e.get("t")
                 self._emit(msg)
             elif msg:

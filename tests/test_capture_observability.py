@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 from bridge.pddbridge_source import PddbridgeSource
@@ -142,3 +143,27 @@ def test_log_source_recent_activity_is_ok():
     agent.watcher = W()
     stat = agent._capture_status()
     assert stat["ok"] is True and stat["reason"] == "log_source"
+
+
+def test_dedup_window_covers_history_window():
+    """去重窗口必须覆盖回扫窗口，否则回扫会把已上报的消息当新的再传一遍。
+
+    现场实证：18:31:02 一条 8 分钟前的 AI 回复被回扫重新上报（旧窗口写死 120 秒，
+    回扫窗口 1800 秒）。
+    """
+    src = PddbridgeSource({"history_report_max_age_seconds": 1800}, on_event=lambda m: None)
+    assert src._dedup_window() == 1800.0
+
+    msg_id = "1795515751927"
+    assert src._seen_before(msg_id) is False          # 第一次见
+    assert src._seen_before(msg_id) is True           # 立刻重复 → 拦
+    # 模拟 3 分钟后再来（旧实现这里会放行）
+    src._seen_any[msg_id] = time.time() - 180
+    assert src._seen_before(msg_id) is True
+    # 超过窗口才允许再报
+    src._seen_any[msg_id] = time.time() - 1900
+    assert src._seen_before(msg_id) is False
+
+    # 显式配置优先
+    src.cfg["dedup_window_seconds"] = 60
+    assert src._dedup_window() == 60.0

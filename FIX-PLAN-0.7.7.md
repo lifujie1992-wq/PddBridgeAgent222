@@ -435,3 +435,55 @@ STATE -> READY 1 INSTANCE 000001820770B440 CAPTURE 0 HOOKS 0
 - **原生接收**：`PROBE` 会导致 `PddWorkbench` 崩溃（0xC0000005，见附录 E），
   `recv_via_dll` 必须保持 false，需 DLL 侧重做探针。
 - **20 店尾部覆盖**：游标 + 并行已就位，但没有客户现场 20 店数据验证。
+
+---
+
+# 附录 G：进程级原生接收已打通（2026-11-24 现场实测）
+
+## G.1 关键结论
+
+`RECV_AUTO=1`（全槽位嗅探）+ `RECV_ON` 可以在**不知道槽位号**的情况下完成进程级接收，
+而且不写探针日志、不踩 `g_log_lock` 未初始化那个崩溃。
+
+正确命令顺序（顺序错了会被导出钩子短路，`recv_register` 根本不执行）：
+
+```
+RECV_UNHOOK            # 先卸导出钩子
+RECV_MSGSdk_ON|0       # 关掉 opt-in，让 recv_install_export_hooks 返回非 0
+RECV_SLOT|-1
+RECV_MODE|0
+RECV_AUTO|1
+RECV_ON                # → OK recv=0 hook=-4 rc=0 reg=1 plug=1 slot=-1 auto=1
+```
+
+## G.2 实测数据（PDD 3.5.0.40）
+
+```
+18:31:02.350  event queued  history=False source=pdd_native   ← 原生回调接住买家消息
+18:31:03.538  upload terminal（中心确认）
+RECV_STATE:   reg=1 total=2 acked=2 spoolbytes=1055
+```
+
+| 段 | 耗时 |
+|---|---|
+| 平台 ts → 本地抓到 | **7.2–7.3 秒**（4 条样本一致，PDD 服务端推送延迟，非本地） |
+| 本地抓到 → 中心确认 | **1.0–1.2 秒** |
+| 出站 AI 回复（命令→回执确认） | **2.0–2.8 秒** |
+
+对照：0.7.6 现场是 88–90 秒（90 秒历史门槛），20 店高峰中位 383 秒。
+
+## G.3 同时修掉的 bug：回扫重复上报
+
+同一秒的日志暴露出：8 分钟前那条 AI 回复被回扫当成新消息重新上报（并且上传成功）。
+
+- 原因：`_dedup` / `_seen_before` 的去重窗口**写死 120 秒**，而回扫窗口是
+  `history_report_max_age_seconds`（1800 秒）→ 2 分钟后就不再算“见过”。
+- 修法：去重窗口取 `max(300, history_report_max_age_seconds)`，可用
+  `dedup_window_seconds` 显式覆盖；去重表超 5 万条按窗口清理，避免长跑无限增长。
+
+中心若按消息触发 AI 回复，这个 bug 会造成**同一句话被回复十几次**。
+
+## G.4 现在还能不能关回扫
+
+可以：`pdd_native` 是进程级实时，回扫退化为安全网（断线/重启补漏）。
+建议 `history_pull_seconds=120`（默认值）而不是关到 0 —— 保留兜底，去重已经不会再重复上报。
