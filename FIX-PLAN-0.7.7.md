@@ -487,3 +487,21 @@ RECV_STATE:   reg=1 total=2 acked=2 spoolbytes=1055
 
 可以：`pdd_native` 是进程级实时，回扫退化为安全网（断线/重启补漏）。
 建议 `history_pull_seconds=120`（默认值）而不是关到 0 —— 保留兜底，去重已经不会再重复上报。
+
+---
+
+# 附录 H：便携包启动器（拼多多商家端(90科技)）
+
+原来的 `start_pdd_portable.cmd` 是黑窗口，客户看着不像官方客户端。改成：
+
+- `桌面\dd\拼多多商家端(90科技).exe` —— 无控制台、带拼多多客户端图标（256 原图重采样成
+  16/24/32/48/64/128/256 七种尺寸，桌面小图标不发糊），失败时弹消息框而不是一闪而过
+- 桌面快捷方式 `拼多多商家端(90科技)` —— 指向这个 exe，图标取 exe 内嵌
+
+生成工具（可复现）：
+- `tools/make_multi_ico.py`：把客户端自带的单尺寸 ico 重采样成多尺寸（盒式平均，带 alpha 预乘）
+- `tools/pdd_90_launcher.py`：后台调 `start_pdd_portable.ps1`，`CREATE_NO_WINDOW`，退出码非 0 时弹框
+
+顺带修了便携脚本一个真实缺陷：`start_pdd_portable.ps1` 以前无条件覆盖
+`%PUBLIC%\PddPortableRuntime\3.5.0.40\plugins\*.dll`，而客户端正在运行时那些 DLL 被占用，
+复制必然失败（旧 .cmd 的 `pause` 只能让人看到报错）。已加"已在运行则直接退出"的前置判断。
