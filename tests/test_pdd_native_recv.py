@@ -280,3 +280,32 @@ def test_history_hold_policy_maps_to_window():
         stub = Stub()
         stub.cfg = cfg
         assert BridgeAgent._history_window(stub) == expected, cfg
+
+
+# ---------------- 0.7.11: 导出 detour 接收路径（不依赖虚表槽位） ----------------
+def test_hook_install_opts_in_then_installs(monkeypatch):
+    """RECV_HOOK 默认被 DLL 拒绝（unverified 路径），必须先 opt-in。
+
+    这条路径按 MsgSdk 导出名（NotifyWSMessage / CheckWSMsg）定位，不需要探针，
+    因此不会踩 3.5.0.40 上“未初始化临界区”崩溃的坑。
+    """
+    calls: list = []
+    monkeypatch.setattr(NativeReceiver, "_command",
+                        lambda self, text, timeout=3.0: calls.append(text) or "OK hook=0 notify=1 check=1")
+    recv = NativeReceiver(lambda raw: None, cfg={"recv_slot": -1})
+    assert recv.hook_install() == "OK hook=0 notify=1 check=1"
+    assert calls == ["RECV_MSGSdk_ON|1", "RECV_HOOK"]
+
+
+def test_probe_is_opt_in_not_default():
+    """探针会崩客户端，配置默认必须是关的。"""
+    from bridge.config import load_config
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "bridge_config.json"
+        path.write_text("{}", encoding="utf-8")
+        cfg = load_config(path)
+    assert cfg["recv_probe"] is False
+    assert cfg["recv_slot"] == -1

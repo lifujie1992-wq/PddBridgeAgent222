@@ -1034,8 +1034,16 @@ class PddbridgeSource:
         log.info("pddbridge 会话已移除 %s（剩余 %d 个）", session.label(), len(self.sessions))
 
     def _apply_native_recv_config(self) -> None:
-        """把探针/转发配置下发给 DLL; 管道未就绪（注入中）时后台重试。"""
+        """启用原生接收。
+
+        三种模式（优先级从高到低）：
+          1. ``recv_slot >= 0``      → 按已确认的虚表槽位注册；
+          2. ``recv_probe = true``   → 全槽位探针（**会崩客户端**，仅副本机排障）；
+          3. 默认                    → 导出 detour（NotifyWSMessage/CheckWSMsg），
+                                      不需要槽位、不靠 RVA，实测 3.5.0.40 可用。
+        """
         slot = int(self.cfg.get("recv_slot") or -1)
+        want_probe = bool(self.cfg.get("recv_probe", False))
         recv = self._native_recv
         if recv is None or getattr(recv, "_native_cfg_done", False):
             return
@@ -1046,14 +1054,24 @@ class PddbridgeSource:
             for _ in range(6):
                 if self._stop_evt.is_set():
                     return
-                reply = recv.probe(str(probe_path)) if slot < 0 else recv.configure()
-                if reply and not reply.startswith("pipe_"):
+                if slot >= 0:
+                    reply = recv.configure()
+                    ok = reply and not reply.startswith("pipe_")
+                    what = "虚表槽位 mode=slot(%s)" % slot
+                elif want_probe:
+                    reply = recv.probe(str(probe_path))
+                    ok = reply and not reply.startswith("pipe_")
+                    what = "探针（注意：3.5.0.40 会崩，仅排障用）"
+                else:
+                    reply = recv.hook_install()
+                    ok = bool(reply) and "hook=0" in reply
+                    what = "导出 detour"
+                if ok:
                     recv._native_cfg_done = True
-                    if slot < 0:
-                        log.info("原生接收探针已开启: %s （买家发一条消息后查看 SLOT 号）", probe_path)
-                    else:
-                        log.info("原生接收通道已启动（slot=%s）", slot)
+                    log.info("原生接收已启动（%s）: %s", what, reply)
                     return
+                if reply and not reply.startswith("pipe_"):
+                    log.warning("原生接收启动被拒（%s）: %s", what, reply)
                 time.sleep(5.0)
             log.warning("原生接收配置下发失败（管道未就绪），下轮重扫会重试")
 

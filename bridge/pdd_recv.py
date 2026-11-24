@@ -117,8 +117,22 @@ class NativeReceiver:
         self._command(f"RECV_MODE|{mode}")
         return self._command("RECV_ON")
 
+    def hook_install(self) -> str:
+        """安装导出 detour（`NotifyWSMessage` / `CheckWSMsg`）。
+
+        这是不靠虚表槽位的接收路径：按 MsgSdk 导出名定位，跨版本稳定，
+        也不需要 PROBE（探针在 3.5.0.40 上会因未初始化临界区崩客户端）。
+        DLL 默认拒这条（g_msgsdk_recv_optin），要先显式 opt-in。
+        """
+        self._command("RECV_MSGSdk_ON|1")
+        return self._command("RECV_HOOK")
+
     def probe(self, log_path: str) -> str:
-        """探针模式：注册回调并全槽位记录触发日志，不转发。"""
+        """探针模式：注册回调并全槽位记录触发日志，不转发。
+
+        ⚠️ 3.5.0.40 实测：PROBE 会在 `recv_write` 里进未初始化的 CRITICAL_SECTION，
+        导致 PddWorkbench 崩在 ntdll+0x1A12D（写 0x24）。仅供副本客户端排障。
+        """
         return self._command(f"PROBE|{log_path}")
 
     def recv_state(self) -> str:
