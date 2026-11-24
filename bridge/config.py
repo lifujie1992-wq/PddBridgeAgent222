@@ -88,7 +88,7 @@ def migrate_config(cfg_path: Path, data: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         log.warning("配置升级写回失败（继续用内存值）: %s", exc)
     return data
-DEFAULT_SERVER_URL = "http://47.107.138.228:18765"
+DEFAULT_SERVER_URL = "http://47.112.219.14:18765"
 
 
 def resolve_log_dir(path: str) -> str:

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """PddBridgeAgent — local Tanyu channel bridge for multi-seat deployments.
 
 Does NOT run AI/brain. Only:
@@ -10,6 +10,7 @@ Does NOT run AI/brain. Only:
 import hashlib
 
 __version__ = "0.7.11.0"
+__product__ = "90科技拼多多桥接助手"
 __build_hash__ = hashlib.sha256(
     f"PddBridgeAgent|{__version__}|pdd-imws-v2-business-message".encode("utf-8")
 ).hexdigest()[:16]

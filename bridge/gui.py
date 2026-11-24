@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 from urllib.parse import urlparse
 
-from . import __version__
+from . import __product__, __version__
 from .agent import BridgeAgent
 from .config import default_config_path, load_config, save_config, write_example_config
 from .platforms import get_platform
@@ -409,7 +409,7 @@ class BridgeGuiApp:
     def __init__(self, *, platform: str = "pdd") -> None:
         self.platform = get_platform(platform)
         self.root = tk.Tk()
-        self.root.title(f"{self.platform.label}桥接助手  v{__version__}")
+        self.root.title(f"{__product__}  v{__version__}")
         self.root.geometry("540x640")
         self.root.minsize(480, 560)
         self.root.configure(bg="#f4f6f8")
@@ -444,7 +444,7 @@ class BridgeGuiApp:
         header.pack(fill=tk.X)
         tk.Label(
             header,
-            text=f"{self.platform.label}桥接助手",
+            text=__product__,
             font=("Microsoft YaHei UI", 16, "bold"),
             fg="white",
             bg=color,

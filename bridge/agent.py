@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-from . import __build_hash__, __version__
+from . import __build_hash__, __product__, __version__
 from .client import BridgeClient, BridgeClientError
 from .command_journal import CommandJournal
 from .event_queue import append_event
@@ -1659,8 +1659,8 @@ class BridgeAgent:
 
     def run_forever(self) -> None:
         log.info(
-            "%s 桥接助手 %s 启动  工位=%s  服务器=%s",
-            self.platform.label,
+            "%s %s 启动  工位=%s  服务器=%s",
+            __product__,
             __version__,
             self.cfg.get("agent_name") or self.cfg.get("agent_id"),
             self.cfg.get("server_url"),
