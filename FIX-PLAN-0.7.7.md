@@ -348,3 +348,90 @@ spool 帧数        : 17
 `tests/test_order_gate.py` 8 条 + 原有 19 条 = **27/27 通过**：
 已付款拦截（含 pay_status 各种表示）、未付款/已关闭/无单放行、多单以"有已付即拦"为准、
 查询失败默认 fail-closed、窗口排除历史旧单、闸门关闭时完全放行。
+
+---
+
+# ⚠️ 附录 E：原生接收实测结论（2026-11-24，PDD 3.5.0.40 现场）
+
+## E.1 直发（send_via_dll）：✅ 已打通
+
+现场实测（`PddWorkbench.exe` 主进程 + `pdd_send_v5.dll`）：
+
+```
+STATE -> READY 1 INSTANCE 000001820770B440 CAPTURE 0 HOOKS 0
+```
+
+三个必须知道的坑：
+
+1. **注入目标必须是 `PddWorkbench.exe`（主进程）**，`pddwebworkbench.exe` 那些是 CEF 子进程，注入进去管道能建但没用。
+2. **`injector.exe` 必须传 DLL 绝对路径**。传相对路径时远程 `LoadLibrary` 返回 0（`remote module handle=0x00000000`，exit=8），看起来"注入成功"其实没加载。
+3. **管道名带 `_v4` 后缀**：`pdd_send_bridge_v4` / `pdd_recv_bridge_v4` / `pdd_recv_ack_v4`。
+   我们代码里原本三处都写的是不带后缀的 `pdd_send_bridge` —— 这就是
+   `send_via_dll` 从加进来那天起一直"直发通道未就绪"、静默回退 CDP 的原因。
+   已统一到 `bridge/pdd_pipes.py`。
+
+## E.2 接收（recv_via_dll）：❌ PROBE 会让客户端崩溃
+
+执行 `PROBE|<log>` 后 **PddWorkbench 直接崩溃**：
+
+```
+C:\...\3.5.0.40_x64\CrashDump\603edd0e-3eba-494e-a85b-3c6de184df78.dmp  (580 KB)
+异常码 0xC0000005（访问冲突），dump 内含 "PROBE" 与 "pdd_recv" 字符串
+```
+
+即 vtable 全槽位探针在 3.5.0.40 上不安全（大概率是某个槽位按错误签名被调用）。
+叠加仓库里 `out/pdd_wb.ini` 对 `0x37544` 的标注（"RVA 表已被撤回，需实测序言"），
+**当前两条接收路径都不能上生产**。
+
+### 硬性要求
+
+1. **`recv_via_dll` 保持 false**，不要在客户机器上跑 `PROBE`；
+2. 探针只能在**副本客户端**（可重启、不影响接待）上做，并且要：
+   - 一次只 hook 一个候选槽位，不是全槽位遍历；
+   - hook 内加异常保护（`__try/__except` 或 SEH），失败只记日志不崩；
+   - 记录崩溃时的槽位号与调用栈，先定位再重试。
+
+## E.3 因此 0.7.11 的重心改为「不依赖实时帧也能工作」
+
+既然实时通道暂时不可用，就必须让**回扫**在"页面无 socket"的情况下也能跑起来：
+
+- `_recent_buyers` 目前只由实时帧填充 → socket 死时是空表 → 回扫一次都不触发（现场实测：`pending=0` 全程、本地队列 0 字节、本地工作台 `session_count=0`）；
+- 需要：用"当前打开的会话 + 账号列表 + 历史回扫结果"兜底填充候选；
+- 并且 `status` 要暴露 `frames_last_5m / last_frame_at / history_targets`，**注入成功但零帧时打 WARN**，别再让界面显示"一切正常"。
+
+---
+
+# 附录 F：0.7.11.0 采集可观测性 + 回扫目标兜底（现场实测）
+
+## F.1 改了四处
+
+| 位置 | 改动 |
+|---|---|
+| `bridge/pdd_pipes.py`（新） | 管道名单一事实来源：`pdd_send_bridge_v4` / `pdd_recv_bridge_v4` / `pdd_recv_ack_v4`（带实例后缀），并保留老名字兜底。**这是 `send_via_dll` 一直"未就绪"的真因** |
+| `bridge/pdd_recv.py` | 命令下发走 `send_candidates()`（新名优先、老名兜底），实例后缀跟随配置 |
+| `bridge/agent.py` | ① 回扫目标表：任何入站消息（含回扫结果）都记录，**不再只认实时帧**；② 落盘 `history_targets_pdd.json`，重启恢复；③ 游标轮转 + `history_pull_workers` 并行拉取；④ 空目标表时 WARN |
+| `bridge/agent.py` + `watcher.py` | 采集看门狗：`capture` 字段（`ok/reason/detail`），日志通道用 `last_line_at` 判断是否真的在动；`frames_total/frames_last_5m/last_frame_at` 进 status |
+
+## F.2 现场实测（本机，探域没跑、页面无 socket）
+
+```
+[WARNING] history pull: 没有回扫目标（实时通道无帧、也没有历史会话记录），
+          消息只能靠主通道，请确认探域日志/原生接收是否正常
+[WARNING] 采集告警: 没有收到任何消息（log_idle）—— 日志通道已 10 分钟没有新行（探域可能没在跑）
+```
+
+以前这两种情况界面上都是"一切正常"，客户只能反馈"我发了消息本地不显示"。
+
+## F.3 直发通道验证
+
+```
+STATE -> READY 1 INSTANCE 000001820770B440 CAPTURE 0 HOOKS 0
+```
+
+管道名修对之后，`send_via_dll` 可用（之前三处都写错名字，静默回退 CDP）。
+
+## F.4 仍未能解决
+
+- **原生接收**：`PROBE` 会导致 `PddWorkbench` 崩溃（0xC0000005，见附录 E），
+  `recv_via_dll` 必须保持 false，需 DLL 侧重做探针。
+- **20 店尾部覆盖**：游标 + 并行已就位，但没有客户现场 20 店数据验证。

@@ -21,7 +21,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PIPE = r"\\.\pipe\pdd_send_bridge"
+from .pdd_pipes import send_candidates
+
+DEFAULT_PIPE = send_candidates()[0]
 DEFAULT_DLL = r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"
 DEFAULT_INJECTOR = r"D:\temp\pdd-send-hook\out\injector.exe"
 WORKBENCH_EXE = "pddworkbench.exe"

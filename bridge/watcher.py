@@ -89,6 +89,7 @@ class LogWatcher:
         self._pending_lock = threading.RLock()
         self._product_context_by_message: Dict[Tuple[str, str, str], dict] = {}
         self._stats_lock = threading.Lock()
+        self._last_line_at = 0.0
         self._stats: Dict[str, Dict[str, int]] = {}
         self._unmatched_samples: Dict[str, List[str]] = {}
         self._multiline_candidates: Dict[str, Tuple[str, float]] = {}
@@ -622,6 +623,7 @@ class LogWatcher:
 
     def _bump(self, source: str, field: str, amount: int = 1) -> None:
         with self._stats_lock:
+            self._last_line_at = time.time()
             stats = self._stats.setdefault(
                 source,
                 {
@@ -666,6 +668,8 @@ class LogWatcher:
             "sources": sources,
             "files": files,
             "totals": totals,
+            # 采集看门狗用：日志通道多久没读到新行了（探域没跑时这里是 0）
+            "last_line_at": getattr(self, "_last_line_at", 0.0),
             "unmatched_candidate_samples": samples,
             "parsed_pending": len(self._pending_events),
             "oldest_parsed_wait_seconds": max(

@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -275,6 +276,11 @@ class PddbridgeSource:
         self.port = None           # 主会话端口（兼容旧字段）
         self._account_hint = ""
         self.msg_count = 0
+        # 采集可观测性：注入成功但零帧是"假正常"的最大来源
+        # （现场：socket=none / 探域没跑 → 全程 pending=0，而界面一切正常）
+        self._frame_stamps: "deque[float]" = deque(maxlen=20000)
+        self._last_frame_at = 0.0
+        self._frames_seen = 0
         self.send_count = 0
         self.last_error = ""
 
@@ -403,6 +409,9 @@ class PddbridgeSource:
         self.state = STOPPED
 
     def status(self) -> dict:
+        now = time.time()
+        frames_5m = sum(1 for ts in self._frame_stamps if now - ts <= 300.0)
+        idle = (now - self._last_frame_at) if self._last_frame_at else None
         return {
             "state": self.state,
             "port": self.sessions[0].port if self.sessions else None,
@@ -410,9 +419,17 @@ class PddbridgeSource:
             "send_ready": self.state == LISTENING and any(s.send_capable for s in self.sessions),
             "msg_count": self.msg_count,
             "send_count": self.send_count,
+            # 采集是否真的在跑（injected 只代表注入成功，不代表有数据）
+            "frames_total": self._frames_seen,
+            "frames_last_5m": frames_5m,
+            "last_frame_at": self._last_frame_at,
+            "frame_idle_seconds": idle,
+            "capture_ok": bool(self.sessions) and frames_5m > 0,
             "sessions": [
                 {"port": s.port, "ctx": s.cid, "account": s.account, "mall_id": s.mall_id,
-                 "push": s.push_ok, "frames": s.frames, "url": (s.target_url or "")[:80]}
+                 "push": s.push_ok, "frames": s.frames, "url": (s.target_url or "")[:80],
+                 "socket_state": s.socket_state, "failures": s.failures,
+                 "last_frame_at": s.last_frame_at}
                 for s in self.sessions
             ],
             "accounts": [s.account for s in self.sessions if s.account],
@@ -1249,6 +1266,9 @@ class PddbridgeSource:
         用一把粗粒度锁即可（每帧只做纯 CPU 工作，不阻塞 IO）。
         """
         with self._frame_lock:
+            self._frames_seen += 1
+            self._last_frame_at = time.time()
+            self._frame_stamps.append(self._last_frame_at)
             self._handle_frame_locked(e, session)
 
     def _handle_frame_locked(self, e: dict, session: _Session | None = None) -> None:

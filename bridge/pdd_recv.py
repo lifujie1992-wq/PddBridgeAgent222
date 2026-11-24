@@ -26,15 +26,15 @@ import threading
 
 log = logging.getLogger("pdd_native_recv")
 
-SEND_PIPE = r"\\.\pipe\pdd_send_bridge"
+from .pdd_pipes import (PIPE_VERSION, ack_pipe, legacy, recv_pipe, send_candidates)
 
 #: 接收管道协议版本，与 DLL 源码里的 ``_v4`` 后缀一一对应
-RECV_PIPE_VERSION = "v4"
+RECV_PIPE_VERSION = PIPE_VERSION
 RECV_PIPE_PREFIX = "pdd_recv_bridge"
 ACK_PIPE_PREFIX = "pdd_recv_ack"
 
 #: 兼容老 DLL（无版本后缀、无 seq、无 ACK）
-LEGACY_RECV_PIPE = r"\\.\pipe\pdd_recv_bridge"
+LEGACY_RECV_PIPE = legacy(RECV_PIPE_PREFIX)
 
 FRAME_PREFIX = "FRAME|"
 _SUFFIX_RE = re.compile(r"[^0-9A-Za-z_-]")
@@ -51,17 +51,15 @@ def pipe_suffix(cfg: dict | None = None) -> str:
 
 
 def recv_pipe_path(cfg: dict | None = None) -> str:
-    explicit = str((cfg or {}).get("recv_pipe_name") or "")
-    if explicit:
-        return explicit
-    return r"\\.\pipe\%s_%s%s" % (RECV_PIPE_PREFIX, RECV_PIPE_VERSION, pipe_suffix(cfg))
+    return recv_pipe(cfg)
 
 
 def ack_pipe_path(cfg: dict | None = None) -> str:
-    explicit = str((cfg or {}).get("recv_ack_pipe_name") or "")
-    if explicit:
-        return explicit
-    return r"\\.\pipe\%s_%s%s" % (ACK_PIPE_PREFIX, RECV_PIPE_VERSION, pipe_suffix(cfg))
+    return ack_pipe(cfg)
+
+
+def send_pipe_path(cfg: dict | None = None) -> str:
+    return send_candidates(cfg)[0]
 
 
 def parse_recv_line_ex(line: bytes | str) -> tuple[int, str] | None:
@@ -125,21 +123,26 @@ class NativeReceiver:
 
     def recv_state(self) -> str:
         return self._command("RECV_STATE")
-
-    @staticmethod
-    def _command(text: str, timeout: float = 3.0) -> str:
+    def _command(self, text: str, timeout: float = 3.0) -> str:
+        """向 DLL 下发一条命令。候选管道：带版本号的优先，老名字兜底。"""
         import time as _t
         deadline = _t.time() + timeout
         while _t.time() < deadline:
-            try:
-                with open(SEND_PIPE, "r+b", buffering=0) as handle:
-                    handle.write(text.encode("utf-8"))
-                    handle.flush()
-                    return handle.read(256).decode("utf-8", "replace").strip()
-            except FileNotFoundError:
+            missing = True
+            for pipe in send_candidates(self.cfg):
+                try:
+                    with open(pipe, "r+b", buffering=0) as handle:
+                        handle.write(text.encode("utf-8"))
+                        handle.flush()
+                        return handle.read(256).decode("utf-8", "replace").strip()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    missing = False
+                    _t.sleep(0.2)
+                    break
+            if missing:
                 return "pipe_not_found"
-            except OSError:
-                _t.sleep(0.2)
         return "pipe_timeout"
 
     # ---- ACK 通道 ----

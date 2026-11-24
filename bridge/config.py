@@ -214,6 +214,10 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "history_pull_max_buyers": int(data.get("history_pull_max_buyers") or 40),
         "history_pull_gap_seconds": float(data.get("history_pull_gap_seconds") or 0.3),
         "history_pull_timeout_seconds": float(data.get("history_pull_timeout_seconds") or 3.0),
+        # 0.7.11：回扫并行度 / 目标表存活时间 / 零帧告警间隔
+        "history_pull_workers": int(data.get("history_pull_workers") or 3),
+        "history_target_ttl_seconds": float(data.get("history_target_ttl_seconds") or 86400.0),
+        "capture_warn_seconds": float(data.get("capture_warn_seconds") or 600.0),
         "history_report_max_age_seconds": float(data.get("history_report_max_age_seconds") or 1800),
         # 历史/回扫事件等多久才上送。legacy=90s（兼容不认 is_history 的老中心）；
         # ack_capable=0s（中心自己按 is_history 决定回不回，不必再压 90 秒）。
@@ -275,7 +279,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "cdp_emit_history": bool(data.get("cdp_emit_history", False)),
         # 可选：走注入 DLL 直发（需先注入, 未就绪自动回退 CDP）。默认关。
         "send_via_dll": bool(data.get("send_via_dll", False)),
-        "send_via_dll_pipe": str(data.get("send_via_dll_pipe") or r"\\.\pipe\pdd_send_bridge"),
+        "send_via_dll_pipe": str(data.get("send_via_dll_pipe") or ""),
         "pdd_dll_path": str(data.get("pdd_dll_path") or r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"),
         "pdd_injector_path": str(data.get("pdd_injector_path") or r"D:\temp\pdd-send-hook\out\injector.exe"),
         # 原生接收（v0.7）: recv_via_dll 开启后从注入 DLL 收 push 帧；
@@ -324,6 +328,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "history_pull_max_buyers": int(cfg.get("history_pull_max_buyers") or 40),
         "history_pull_gap_seconds": float(cfg.get("history_pull_gap_seconds") or 0.3),
         "history_pull_timeout_seconds": float(cfg.get("history_pull_timeout_seconds") or 3.0),
+        "history_pull_workers": int(cfg.get("history_pull_workers") or 3),
+        "history_target_ttl_seconds": float(cfg.get("history_target_ttl_seconds") or 86400.0),
+        "capture_warn_seconds": float(cfg.get("capture_warn_seconds") or 600.0),
         "history_report_max_age_seconds": float(cfg.get("history_report_max_age_seconds") or 1800),
         "history_report_user_only": bool(cfg.get("history_report_user_only", True)),
         "order_gate_state": str(cfg.get("order_gate_state") or ""),
@@ -398,6 +405,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "history_pull_max_buyers": 40,
         "history_pull_gap_seconds": 0.3,
         "history_pull_timeout_seconds": 3.0,
+        "history_pull_workers": 3,
+        "history_target_ttl_seconds": 86400,
+        "capture_warn_seconds": 600,
         "history_report_max_age_seconds": 1800,
         "history_report_user_only": True,
         "order_gate_state": "",

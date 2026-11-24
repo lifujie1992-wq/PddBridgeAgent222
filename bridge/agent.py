@@ -345,12 +345,12 @@ class BridgeAgent:
         account = str(msg.get("account") or "").strip()
         if account:
             self._accounts_seen[account] = time.time()
-        if account and msg.get("buyer_id") and not msg.get("is_history") and not msg.get("is_diagnostic"):
-            # 记录“最近活跃会话”（只看实时帧），供 CDP 周期补拉历史
-            recent = getattr(self, "_recent_buyers", None)
-            if recent is None:
-                recent = self._recent_buyers = {}
-            recent[(account, str(msg.get("buyer_id")))] = time.time()
+        if account and msg.get("buyer_id") and not msg.get("is_diagnostic"):
+            # 记「活跃会话」，供 CDP 周期补拉历史。
+            # 0.7.11：以前只认实时帧（not is_history），结果实时通道一死，候选表就是空的，
+            # 连回扫都不触发（现场：pending=0 全程、本地队列 0 字节）。
+            # 现在任何入站消息都记，并持久化，重启不丢。
+            self._note_history_target(str(account), str(msg.get("buyer_id")), bool(msg.get("is_history")))
         event = self._ensure_event_id({
             "type": "message",
             "platform": msg.get("platform") or self.platform.name,
@@ -622,7 +622,48 @@ class BridgeAgent:
             "last_error": self._last_error or src_last_error or self.watcher.last_error,
             "websocket": self.client.transport_status(),
             "dry_run": bool(self.cfg.get("dry_run")),
+            # 采集健康度：“注入成功”不等于“有数据”，这两组字段就是为此而加。
+            "capture": self._capture_status(cdp_stats),
+            "history_pull": getattr(self, "_history_pull_stats", {}),
+            "history_targets": len(getattr(self, "_recent_buyers", None) or {}),
         }
+
+    def _capture_status(self, cdp_stats: dict | None = None) -> dict:
+        """真实采集状态：最近有没有帧、卡在哪里。"""
+        if self._effective_source == "cdp" and cdp_stats is not None:
+            if not cdp_stats.get("injected"):
+                return {"ok": False, "reason": "not_injected",
+                        "detail": "工作台页面未注入（未发现 CDP 端口或会话）"}
+            frames = int(cdp_stats.get("frames_last_5m") or 0)
+            if frames > 0:
+                return {"ok": True, "reason": "frames", "frames_last_5m": frames}
+            sockets = sorted({str(s.get("socket_state") or "?") for s in (cdp_stats.get("sessions") or [])})
+            return {"ok": False, "reason": "no_frames",
+                    "frames_last_5m": 0,
+                    "last_frame_at": cdp_stats.get("last_frame_at") or 0,
+                    "socket_states": sockets,
+                    "detail": "已注入但最近 5 分钟零帧：页面无 JS socket 时需原生接收或探域日志"}
+        # 日志通道：看 watcher 真的读到新行没有（探域没跑时这里是 0）
+        try:
+            diag = self.watcher.diagnostics()
+        except Exception:
+            diag = {}
+        if not diag.get("files"):
+            return {"ok": False, "reason": "no_log_files", "stats": diag,
+                    "detail": "没找到可监听的日志文件（探域未安装/未启动？）"}
+        last_line = float(diag.get("last_line_at") or 0.0)
+        try:
+            idle_limit = max(60.0, float(self.cfg.get("capture_warn_seconds") or 600.0))
+        except (TypeError, ValueError):
+            idle_limit = 600.0
+        idle = (time.time() - last_line) if last_line else None
+        if last_line and idle is not None and idle <= idle_limit:
+            return {"ok": True, "reason": "log_source", "idle_seconds": round(idle, 1),
+                    "stats": diag}
+        return {"ok": False, "reason": "log_idle", "idle_seconds": idle,
+                "stats": diag,
+                "detail": "日志通道已 %.0f 分钟没有新行（探域可能没在跑）"
+                          % ((idle or idle_limit) / 60.0)}
 
     def _allowlist_enforced(self) -> bool:
         return False
@@ -1360,6 +1401,86 @@ class BridgeAgent:
             if not self._report_command_result(command_id, result):
                 break
 
+    # ---------------- 回扫目标表（落盘，冷启动不丢） ----------------
+    def _history_targets_file(self) -> Path:
+        path = getattr(self, "_history_targets_path", None)
+        if path is None:
+            base = Path(str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl")).parent
+            path = base / ("history_targets_%s.json" % (self.platform.name or "pdd"))
+            self._history_targets_path = path
+        return path
+
+    def _ensure_history_targets(self) -> dict:
+        recent = getattr(self, "_recent_buyers", None)
+        if recent is None:
+            recent = self._recent_buyers = {}
+        # 用独立标记，而不是靠"字典是否为空"猜：字典可能早被别处建好，
+        # 那样落盘的目标就永远不加载（重启后回扫直接失明）。
+        if getattr(self, "_history_targets_loaded", False):
+            return recent
+        self._history_targets_loaded = True
+        path = self._history_targets_file()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return recent
+        ttl = self._history_target_ttl()
+        now = time.time()
+        for row in (data.get("targets") or []):
+            try:
+                account, buyer, ts = str(row[0]), str(row[1]), float(row[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not account or not buyer:
+                continue
+            if ttl > 0 and now - ts > ttl:
+                continue
+            recent[(account, buyer)] = ts
+        if recent:
+            log.info("回扫目标表已恢复 %d 个会话", len(recent))
+        return recent
+
+    def _history_target_ttl(self) -> float:
+        try:
+            return max(0.0, float(self.cfg.get("history_target_ttl_seconds") or 86400.0))
+        except (TypeError, ValueError):
+            return 86400.0
+
+    def _note_history_target(self, account: str, buyer_id: str, is_history: bool = False) -> None:
+        """记住该会话，供周期回扫。实时帧和回扫结果都算——
+
+        旧实现只认实时帧，实时通道一死候选表就空了，回扫一次都不触发。
+        """
+        if not account or not buyer_id:
+            return
+        recent = self._ensure_history_targets()
+        recent[(account, buyer_id)] = time.time()
+        # 表不能无限长：超了就丢最久没出现的
+        cap = 2000
+        if len(recent) > cap:
+            for key in sorted(recent, key=recent.get)[: len(recent) - cap]:
+                recent.pop(key, None)
+        self._save_history_targets()
+
+    def _save_history_targets(self, force: bool = False) -> None:
+        recent = getattr(self, "_recent_buyers", None) or {}
+        now = time.monotonic()
+        last = getattr(self, "_history_targets_saved_at", 0.0)
+        if not force and now - last < 30.0:
+            return
+        self._history_targets_saved_at = now
+        ttl = self._history_target_ttl()
+        wall = time.time()
+        rows = [[account, buyer, ts] for (account, buyer), ts in recent.items()
+                if ttl <= 0 or wall - ts <= ttl]
+        try:
+            path = self._history_targets_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"version": 1, "targets": rows}, ensure_ascii=False),
+                            encoding="utf-8")
+        except OSError as exc:
+            log.debug("回扫目标表写入失败: %s", exc)
+
     def _history_pull_loop(self) -> None:
         """周期性对“最近出现过的会话”走 CDP 回拉历史。
 
@@ -1383,16 +1504,18 @@ class BridgeAgent:
         size = max(1, min(_int("history_pull_size", 20), 200))
         max_buyers = max(1, min(_int("history_pull_max_buyers", 40), 500))
         try:
-            gap = max(0.0, float(self.cfg.get("history_pull_gap_seconds") or 0.3))
+            gap = max(0.0, float(self.cfg.get("history_pull_gap_seconds") or 0.05))
         except (TypeError, ValueError):
-            gap = 0.3
+            gap = 0.05
         try:
             pull_timeout = max(1.0, float(self.cfg.get("history_pull_timeout_seconds") or 3.0))
         except (TypeError, ValueError):
             pull_timeout = 3.0
+        workers = max(1, min(_int("history_pull_workers", 3), 8))
+        self._ensure_history_targets()
+        cursor = 0
+        warned_empty = False
         # 按“起始时刻 + interval”排程，而不是“做完再等 interval”。
-        # 旧写法把一轮的耗时（每个会话 eval + gap）叠在周期上：客户现场 2 个店铺都能
-        # 拖到 41–49 秒才抓到，端到端就被无谓拉长了。
         deadline = time.monotonic()
         while not self._stop.is_set():
             deadline += interval
@@ -1402,20 +1525,69 @@ class BridgeAgent:
             if self._stop.is_set():
                 break
             recent = getattr(self, "_recent_buyers", None) or {}
-            targets = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)[:max_buyers]
+            ordered = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)
+            if not ordered:
+                # 没有候选 = 回扫根本不会发生。必须大声说出来，不能静默。
+                if not warned_empty:
+                    warned_empty = True
+                    log.warning("history pull: 没有回扫目标（实时通道无帧、也没有历史会话记录），"
+                                "消息只能靠主通道，请确认探域日志/原生接收是否正常")
+                continue
+            warned_empty = False
+            # 游标轮转：每轮从上次位置继续，保证尾部店铺也能被扫到（旧实现永远只看 top-N）
+            round_targets = [ordered[(cursor + i) % len(ordered)] for i in range(min(max_buyers, len(ordered)))]
+            cursor = (cursor + len(round_targets)) % len(ordered)
+            started = time.monotonic()
             pulled = 0
-            for (account, buyer), _ts in targets:
-                if self._stop.is_set():
-                    break
-                try:
-                    self.pddbridge_source.pull_history(buyer, account, size=size,
-                                                       timeout=pull_timeout)
-                    pulled += 1
-                except Exception as exc:  # 单条失败不影响其他会话
-                    log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
-                self._stop.wait(gap)
-            if pulled and not self._stop.is_set():
-                log.info("history pull: %d conversation(s) backfilled", pulled)
+            failed = 0
+            if workers == 1:
+                for (account, buyer), _ts in round_targets:
+                    if self._stop.is_set():
+                        break
+                    try:
+                        self.pddbridge_source.pull_history(buyer, account, size=size,
+                                                           timeout=pull_timeout)
+                        pulled += 1
+                    except Exception as exc:
+                        failed += 1
+                        log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
+                    self._stop.wait(gap)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _one(item):
+                    (account, buyer), _ts = item
+                    try:
+                        self.pddbridge_source.pull_history(buyer, account, size=size,
+                                                           timeout=pull_timeout)
+                        return True
+                    except Exception as exc:
+                        log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
+                        return False
+
+                # 并行拉：每个会话在自己的店铺 worker 上执行，互不阻塞（0.7.9 逐店隔离）
+                with ThreadPoolExecutor(max_workers=workers,
+                                        thread_name_prefix="history-pull") as pool:
+                    for ok in pool.map(_one, round_targets):
+                        if self._stop.is_set():
+                            break
+                        if ok:
+                            pulled += 1
+                        else:
+                            failed += 1
+            elapsed = time.monotonic() - started
+            self._history_pull_stats = {
+                "rounds": getattr(self, "_history_pull_stats", {}).get("rounds", 0) + 1,
+                "targets": len(ordered),
+                "attempted": len(round_targets),
+                "pulled": pulled,
+                "failed": failed,
+                "last_round_seconds": round(elapsed, 2),
+            }
+            if pulled or failed:
+                log.info("history pull: %d/%d backfilled, %d failed, %.1fs (targets=%d cursor=%d)",
+                         pulled, len(round_targets), failed, elapsed, len(ordered), cursor)
+            self._save_history_targets()
 
     def _command_loop(self) -> None:
         # 中心若不在长轮询里提前返回，20s 的等待会让 AI 回复排名延迟几十秒
@@ -1449,6 +1621,19 @@ class BridgeAgent:
         else:
             log.debug("event queue hold held=%d reason=%s min_remaining=%.1fs",
                       hold["held"], hold["reason"], hold["min_remaining_seconds"])
+        # 采集看门狗：注入了但一直零帧，界面不能显示“正常”。
+        capture = self._capture_status(
+            self.pddbridge_source.status() if self._effective_source == "cdp" and self.pddbridge_source else None)
+        if not capture.get("ok"):
+            now = time.time()
+            try:
+                warn_every = max(60.0, float(self.cfg.get("capture_warn_seconds") or 600.0))
+            except (TypeError, ValueError):
+                warn_every = 600.0
+            if now - getattr(self, "_capture_warned_at", 0.0) >= warn_every:
+                self._capture_warned_at = now
+                log.warning("采集告警: 没有收到任何消息（%s）—— %s",
+                            capture.get("reason"), capture.get("detail") or "")
         try:
             response = self.client.heartbeat(status)
             profile = response.get("parser_profile") if isinstance(response, dict) else None
