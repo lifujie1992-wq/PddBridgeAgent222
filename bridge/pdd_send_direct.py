@@ -14,7 +14,9 @@ import time
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PIPE = r"\\.\pipe\pdd_send_bridge"
+from .pdd_pipes import send_candidates
+
+DEFAULT_PIPE = send_candidates()[0]
 _CONNECT_TIMEOUT_MS = 300
 _REPLY_TIMEOUT_MS = 3000
 

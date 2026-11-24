@@ -431,7 +431,7 @@
           <input class="cap-input" id="capUserTeam" value="${e(row?.team_id||'')}" placeholder="售后一组"/>
         </label>
         <label class="cap-field wide"><span>可服务店铺 ID（每行一个；留空=全部）</span>
-          <textarea class="cap-textarea" id="capUserShops" placeholder="mall_100000001">${e((row?.shop_ids||[]).join('\n'))}</textarea>
+          <textarea class="cap-textarea" id="capUserShops" placeholder="mall_150792824">${e((row?.shop_ids||[]).join('\n'))}</textarea>
         </label>
         <label class="cap-field wide"><span>${row?'新密码（不改请留空）':'初始密码 *'}</span>
           <input class="cap-input" id="capUserPassword" type="password" placeholder="${row?'留空则不修改':'至少 8 位'}"/>

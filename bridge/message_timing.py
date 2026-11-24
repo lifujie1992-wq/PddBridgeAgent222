@@ -65,12 +65,38 @@ def stamp_message(message, *, historical=False, now=None):
     return row
 
 
-def history_ready(event, now):
-    """Older centers ignore history flags: never submit a replay inside their live window."""
+def history_ready(event, now, window_seconds=None):
+    """把回扫/历史事件放行给中心。
+
+    ``window_seconds`` 是"历史事件要等到多老才能上送"的门槛：
+      * ``None`` → 用旧的 90 秒（保持老行为）；
+      * ``0``    → 立即上送（中心已认 ``is_history``，不会把回补当实时消息回复）；
+      * ``N``    → 等到平台时间超过 N 秒。
+    老中心不认 is_history，回补在它眼里就是实时消息，所以历史记录必须等过了它的
+    实时窗口再发 —— 这就是 90 秒门槛的由来。中心能力确认后可以改小甚至关掉。
+    """
     timestamp = epoch_seconds(event.get("ts"))
     if not timestamp or event.get("history_reason") == "future_platform_time":
         return False
-    return not event.get("is_history") or now - timestamp > LIVE_MAX_AGE_SECONDS
+    if not event.get("is_history"):
+        return True
+    window = LIVE_MAX_AGE_SECONDS if window_seconds is None else float(window_seconds)
+    if window <= 0:
+        return True
+    return now - timestamp > window
+
+
+def hold_remaining(event, now, window_seconds=None):
+    """还要等多少秒才放行；0 表示现在就能发。给"队列卡住"的原因日志用。"""
+    if not event.get("is_history"):
+        return 0.0
+    window = LIVE_MAX_AGE_SECONDS if window_seconds is None else float(window_seconds)
+    if window <= 0:
+        return 0.0
+    timestamp = epoch_seconds(event.get("ts"))
+    if not timestamp:
+        return float("inf")
+    return max(0.0, window - (now - timestamp))
 
 
 def command_expired(command, now):

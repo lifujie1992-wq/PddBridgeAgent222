@@ -1,6 +1,6 @@
 """PDD 直发通道：自动注入管理。
 
-参照探域 Injector 与本地千牛 qn_inject 的做法 —— **在工作台进程出现的第一时间注入**，
+参照探域 Injector 的做法 —— **在工作台进程出现的第一时间注入**，
 这样 DLL 里的构造函数钩子能在工作台初始化阶段捕获 CMChatImpl 实例，从而提供：
   - 直发：进程内调用工作台自己的 SendTextMsg（毫秒级、同步返回成功与否）
   - 不再需要模拟打字 + 事后对账
@@ -21,15 +21,22 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PIPE = r"\\.\pipe\pdd_send_bridge"
+from .pdd_pipes import send_candidates
+
+DEFAULT_PIPE = send_candidates()[0]
 DEFAULT_DLL = r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"
 DEFAULT_INJECTOR = r"D:\temp\pdd-send-hook\out\injector.exe"
 WORKBENCH_EXE = "pddworkbench.exe"
 
 
-def resolve_tool(value: str | None, filename: str, dev_default: str) -> str:
+def resolve_tool(value: str | None, filename: str, dev_default: str,
+                 alternates: tuple[str, ...] = ()) -> str:
     """解析 DLL/注入器路径：配置值存在则用；冻结安装用 exe 同目录；
-    都没有才回退开发机默认路径。客户机装包后无需改配置。"""
+    都没有才回退开发机默认路径。客户机装包后无需改配置。
+
+    alternates：同目录下的备选文件名。原生接收只在 pdd_send_v5.dll 里（v3 无 recv 管道），
+    安装包里可能叫 v5 而老配置写的是 v3，所以两种都要找。
+    """
     from pathlib import Path
     import sys
     if value:
@@ -38,13 +45,16 @@ def resolve_tool(value: str | None, filename: str, dev_default: str) -> str:
                 return value
         except OSError:
             pass
-    candidates = []
+    names = (filename, *alternates)
+    roots = []
     if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / filename)
-    candidates.append(Path(__file__).resolve().parent.parent / filename)
-    for cand in candidates:
-        if cand.exists():
-            return str(cand)
+        roots.append(Path(sys.executable).resolve().parent)
+    roots.append(Path(__file__).resolve().parent.parent)
+    for root in roots:
+        for name in names:
+            cand = root / name
+            if cand.exists():
+                return str(cand)
     return value or dev_default
 
 
@@ -155,7 +165,8 @@ def ensure_injected(cfg: dict | None = None, *, wait_ready_s: float = 12.0) -> b
     """确保工作台已注入且直发就绪。返回是否就绪。"""
     cfg = cfg or {}
     pipe = str(cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
+                       alternates=("pdd_send_v3.dll",))
     injector = resolve_tool(cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
     dll_name = Path(dll).name
 
@@ -196,21 +207,34 @@ class InjectWatcher(threading.Thread):
         self.interval = interval
         self._stop_evt = threading.Event()
         self._last_pid = 0
+        self._retry_pid = 0
+        self._retry_count = 0
+        self._next_retry_at = 0.0
 
     def stop(self) -> None:
         self._stop_evt.set()
 
     def run(self) -> None:
         pipe = str(self.cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v3.dll", DEFAULT_DLL)
+        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
+                           alternates=("pdd_send_v3.dll",))
         injector = resolve_tool(self.cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
         dll_name = Path(dll).name
         while not self._stop_evt.wait(self.interval):
             try:
                 st = pipe_state(pipe)
                 if st and st.startswith("READY 1"):
+                    self._retry_pid = 0
+                    self._retry_count = 0
+                    self._next_retry_at = 0.0
                     continue
                 for pid in workbench_pids():
+                    if pid != self._retry_pid:
+                        self._retry_pid = pid
+                        self._retry_count = 0
+                        self._next_retry_at = 0.0
+                    if time.monotonic() < self._next_retry_at:
+                        continue
                     if pid == self._last_pid and module_loaded(pid, dll_name):
                         continue
                     if module_loaded(pid, dll_name):
@@ -219,6 +243,16 @@ class InjectWatcher(threading.Thread):
                     ok, msg = inject(pid, dll, injector)
                     log.info("直发注入（监视器）pid=%s ok=%s %s", pid, ok, msg)
                     self._last_pid = pid
+                    self._retry_count += 1
+                    # A non-elevated agent launches the injector through UAC.
+                    # Do not keep spawning UAC prompts while that request is
+                    # pending or when the user declined it.
+                    if msg.startswith("已请求提权注入"):
+                        self._next_retry_at = time.monotonic() + 300.0
+                        continue
+                    # Back off when the DLL does not become loaded; a new PID resets this.
+                    delay = min(60.0, max(self.interval, 2.0 ** min(self._retry_count, 6)))
+                    self._next_retry_at = time.monotonic() + delay
             except Exception as exc:
                 log.debug("注入监视器异常: %s", exc)
 
