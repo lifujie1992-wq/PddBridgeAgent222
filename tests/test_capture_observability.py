@@ -167,3 +167,19 @@ def test_dedup_window_covers_history_window():
     # 显式配置优先
     src.cfg["dedup_window_seconds"] = 60
     assert src._dedup_window() == 60.0
+
+
+def test_send_ready_counts_dll_direct_channel():
+    """页面没有 JS socket 时 send_capable 恒 False，但 DLL 直发可用 → 不能报"未就绪"。"""
+    src = PddbridgeSource({"send_via_dll": True}, on_event=lambda m: None)
+    src.state = "listening"
+    src._direct_ready = True
+    src._direct_probe_at = time.time()      # 命中缓存，不真的去敲管道
+    stat = src.status()
+    assert stat["dll_send_ready"] is True
+    assert stat["send_ready"] is True
+    assert stat["page_send_ready"] is False   # 页面确实不可用
+
+    src.cfg["send_via_dll"] = False           # 关掉直发 → 页面不可用就是不可用
+    src._direct_probe_at = 0.0
+    assert src.status()["send_ready"] is False

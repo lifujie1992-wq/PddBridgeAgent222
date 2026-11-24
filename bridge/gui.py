@@ -871,7 +871,7 @@ class BridgeGuiApp:
         if channel_ok:
             self._set_row(self.row_dll, "ok", ch.get("hint") or f"正常，端口 {ch.get('dll_port')}")
         else:
-            self._set_row(self.row_dll, "warn", "未就绪 — 请打开探域 + 拼多多工作台")
+            self._set_row(self.row_dll, "warn", "未就绪 — 请打开拼多多工作台（页面无 socket 时需开启 send_via_dll 直发）")
 
         seat = f"{self.cfg.get('agent_name') or '未命名'}  ·  {self.cfg.get('agent_id') or '-'}"
         if not token_ok:
@@ -902,7 +902,7 @@ class BridgeGuiApp:
                 self._set_banner(
                     "warn",
                     "● 运行中 · 不能发送",
-                    "已连中心并在听消息，但工作台发送口未就绪。请打开探域 + 拼多多工作台",
+                    "已连中心并在听消息，但工作台发送口未就绪。请打开拼多多工作台；页面无 JS socket 时在配置里开启 send_via_dll",
                 )
                 self.status_bar.set("状态：运行中（中心✓ 发送✗）")
             elif not center_ok:

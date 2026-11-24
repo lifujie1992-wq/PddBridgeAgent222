@@ -281,6 +281,9 @@ class PddbridgeSource:
         self._frame_stamps: "deque[float]" = deque(maxlen=20000)
         self._last_frame_at = 0.0
         self._frames_seen = 0
+        # DLL 直发就绪状态（带缓存：管道是单实例串行，不能每次心跳都去抢）
+        self._direct_ready = False
+        self._direct_probe_at = 0.0
         self.send_count = 0
         self.last_error = ""
 
@@ -408,6 +411,32 @@ class PddbridgeSource:
         self._push.stop()
         self.state = STOPPED
 
+    def _direct_send_ready(self) -> bool:
+        """注入 DLL 的发送通道是否就绪（`STATE -> READY 1`）。
+
+        页面上没有 JS socket 时（PDD 3.5.0.40 就是这样），`send_capable` 永远是 False，
+        但 DLL 直发其实是可用的 —— 界面上却报“工作台发送未就绪”，把人带沟里。
+        """
+        if not bool(self.cfg.get("send_via_dll", False)):
+            return False
+        now = time.time()
+        if now - self._direct_probe_at < 10.0:
+            return self._direct_ready
+        self._direct_probe_at = now
+        try:
+            from .pdd_direct_inject import pipe_state, send_candidates
+
+            for pipe in send_candidates(self.cfg):
+                state = pipe_state(pipe)
+                if state and state.startswith("READY 1"):
+                    self._direct_ready = True
+                    return True
+            self._direct_ready = False
+        except Exception as exc:
+            log.debug("直发就绪探测失败: %s", exc)
+            self._direct_ready = False
+        return self._direct_ready
+
     def status(self) -> dict:
         now = time.time()
         frames_5m = sum(1 for ts in self._frame_stamps if now - ts <= 300.0)
@@ -416,7 +445,11 @@ class PddbridgeSource:
             "state": self.state,
             "port": self.sessions[0].port if self.sessions else None,
             "injected": bool(self.sessions),
-            "send_ready": self.state == LISTENING and any(s.send_capable for s in self.sessions),
+            "send_ready": ((self.state == LISTENING and any(s.send_capable for s in self.sessions))
+                            or self._direct_send_ready()),
+            "page_send_ready": (self.state == LISTENING
+                                and any(s.send_capable for s in self.sessions)),
+            "dll_send_ready": self._direct_ready,
             "msg_count": self.msg_count,
             "send_count": self.send_count,
             # 采集是否真的在跑（injected 只代表注入成功，不代表有数据）
@@ -1760,7 +1793,17 @@ def channel_status_cdp(cfg: dict | None = None) -> dict:
         discovery = "cdp_auto"
     port = alive[0] if alive else None
     injected = bool(st.get("injected"))
-    send_ready = bool(st.get("send_ready"))
+    page_ready = bool(st.get("page_send_ready", st.get("send_ready")))
+    dll_ready = bool(st.get("dll_send_ready"))
+    send_ready = page_ready or dll_ready
+    if dll_ready:
+        hint = "工作台发送：DLL 直发就绪"
+    elif page_ready:
+        hint = "工作台发送：页面通道就绪"
+    elif injected:
+        hint = "CDP 注入已就绪，但发送通道未就绪（页面无 socket 时需开 send_via_dll）"
+    else:
+        hint = "CDP 扫描中…"
     return {
         "dll_ready": send_ready,
         "dll_port": port,
@@ -1769,11 +1812,11 @@ def channel_status_cdp(cfg: dict | None = None) -> dict:
         "port_discovery": discovery,
         "receive_ready": injected,
         "send_ready": send_ready,
+        "page_send_ready": page_ready,
+        "dll_send_ready": dll_ready,
         "sessions": len(st.get("sessions") or []),
         "accounts": list(st.get("accounts") or []),
-        "hint": ("CDP 注入已就绪（%d 个店铺账号）" % len(st.get("accounts") or []))
-                if (injected and st.get("accounts")) else
-                ("CDP 注入已就绪（PDD 实时）" if injected else "CDP 扫描中…"),
+        "hint": hint,
         "source": "pdd_cdp",
     }
 

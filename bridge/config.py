@@ -278,7 +278,9 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "cdp_rescan_seconds": float(data.get("cdp_rescan_seconds") or 20),
         "cdp_emit_history": bool(data.get("cdp_emit_history", False)),
         # 可选：走注入 DLL 直发（需先注入, 未就绪自动回退 CDP）。默认关。
-        "send_via_dll": bool(data.get("send_via_dll", False)),
+        # 3.5.0.40 页面没有 JS socket，CDP 页面发送基本用不了；DLL 直发是唯一稳定通道，
+        # 默认打开（已注入时生效，未注入自动回退 CDP，不影响老行为）。
+        "send_via_dll": bool(data.get("send_via_dll", True)),
         "send_via_dll_pipe": str(data.get("send_via_dll_pipe") or ""),
         "pdd_dll_path": str(data.get("pdd_dll_path") or r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"),
         "pdd_injector_path": str(data.get("pdd_injector_path") or r"D:\temp\pdd-send-hook\out\injector.exe"),
