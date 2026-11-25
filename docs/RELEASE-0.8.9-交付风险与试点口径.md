@@ -1,15 +1,15 @@
-# 90科技拼多多桥接助手 0.8.8 交付风险与试点口径
+# 90科技拼多多桥接助手 0.8.9 交付风险与试点口径
 
 > 面向：发给客户/试点商家之前必须做的检查 + 出了问题怎么回滚。
-> 交付物：`dist/90科技拼多多桥接助手-Setup-0.8.8.0.exe`
-> 本文件由 2026-11-26 的真机验收（本机 0.8.1 → 0.8.8 连续升级 + 真实买家会话）整理。
+> 交付物：`dist/90科技拼多多桥接助手-Setup-0.8.9.0.exe`
+> 本文件由 2026-11-26 的真机验收（本机 0.8.1 → 0.8.9 连续升级 + 真实买家会话）整理。
 
 ## 1. 验收结论（先说重点）
 
 真机验收里发现，客户反馈的「AI 回复有的能发、有的没实际发出、倒计时还在走」不是单一 bug，
 而是四件事叠在一起：
 
-| # | 根因 | 现象 | 0.8.8 |
+| # | 根因 | 现象 | 0.8.9 |
 |---|------|------|-------|
 | 1 | 安装/升级时 RestartManager 会**关掉拼多多工作台**（它加载着 `pdd_send_v6.dll`），而它没注册 `RegisterApplicationRestart`，`RestartApplications=yes` 拉不起来 | 装完客户没重开工作台 → 发送全部 blocked/失败，一条也发不出去 | 安装器装前记下工作台路径，装完**自动重新打开**（已实测：02:36:35 自动拉起） |
 | 2 | `send_and_wait` 只等 5s，超时就把**还在排队的发送撤销**，却返回 `ok=True/indeterminate`「已提交工作台」 | 实际没发出去，中心不重投 → 回复永久丢失；日志里连 `send accepted` 都没有 | 区分「没轮到执行」→ `failed/retryable`；「执行了没回执」→ `accepted` 或 `indeterminate`，且不再撤销已开始的发送 |
@@ -25,7 +25,7 @@
   每次发送先失败一次（`OK 0`）再回退页面，白丢约 2 秒。现在「同文件名族且比安装包旧」会自动
   改用安装包里的 `pdd_send_v6.dll`，并打警告说明换成了哪个。
 
-**真机实测（0.8.8，工作台由安装器自动拉起后）**
+**真机实测（0.8.9，工作台由安装器自动拉起后）**
 
 ```
 send done in 2.08s status=confirmed real_send=True via=cdp+ws
@@ -34,7 +34,7 @@ self reply published locally buyer=4764375385604 delivery=confirmed
 
 连续 4 条全部 `confirmed`。
 
-### 1.1 0.8.8 补的：新装客户会「一条实时消息都收不到」
+### 1.1 0.8.9 补的：新装客户会「一条实时消息都收不到」
 
 `write_example_config()`（首次运行生成配置走的就是它）里有两处开发机残留：
 
@@ -49,12 +49,35 @@ self reply published locally buyer=4764375385604 delivery=confirmed
 - 插件日志 `C:\Users\Public\PddPortableRuntime\<版本>\plugins\logs` 里的 buyer_msg 一条都不读；
 - 只有 CDP 历史回拉能捞到消息（`history_pull_seconds`），实时性极差，`no_frames` 告警不断。
 
-0.8.8 修法：
+0.8.9 修法：
 
 - 首次生成的配置改为 `data_source=tanyu_logs` + `tanyu_log_dir=default_log_dir()`（自动发现便携包目录）；
 - 配置里仍是 `data_source=cdp` 且本机存在插件日志时，加载时打一次明确警告；
 - 启动文案「已开始监听本机探域日志」→「已开始监听本机 PDD 插件日志（路径）」，
   告警「探域可能没在跑」→「拼多多工作台没在跑，或买家没发消息」。
+
+### 1.2 0.8.9 补的：工作台重启后「会话身份 = ?」导致所有回复被 blocked
+
+现场（0.8.8，安装器重启工作台之后）：
+
+```
+03:17:01  pddbridge 会话已挂 ... account=?
+03:17:22  command received（AI 回复）
+03:17:24  send blocked (session unresolved) ... sessions=[('', '')]
+03:17:24  send done status=blocked
+```
+
+会话只在该页面吐出席位信息前 attach 了一次，`account/mall_id` 拿到 `?`/空就不再刷新，
+下一次重读要等 90 秒的健康探测。这段时间里**每一条 AI 回复都被判 blocked**
+（消息确实没发出去），而中心通常不会重投 → 买家收不到回复，浮窗倒计时一路跑到超时。
+
+0.8.9 修法：
+
+- 会话身份未解析时，poll 循环里每 3s 重读一次（`_heal_identity`）；一旦补全打
+  `会话身份已补全` 日志；
+- 超过 120s 仍未解析 → 判定 `lost`，只重注入这一家（重新 attach 会重新解析）；
+- 发送侧兜底：`session_unresolved` / `channel_not_ready` 这类「暂时没就绪」，
+  在命令内重试 3 次（间隔 2s），仍不行才返回 blocked（带 retryable）。
 
 ## 2. 仍然没解决的（必须让客户/自己知道）
 
@@ -97,17 +120,17 @@ self reply published locally buyer=4764375385604 delivery=confirmed
 
 | 项 | 值 |
 |----|----|
-| 源码 commit | `v0.8.8`（基线 `v0.8.1` = 客户现场版） |
-| 版本号 | `bridge/__init__.py`、`run_frontend_service.py` 均为 `0.8.8.0` |
+| 源码 commit | `v0.8.9`（基线 `v0.8.1` = 客户现场版） |
+| 版本号 | `bridge/__init__.py`、`run_frontend_service.py` 均为 `0.8.9.0` |
 | 构建 | `build_release_0.7.7.ps1 -Python <py3.12>`（PyInstaller 6.22.3） |
 | 原生件 | `D:\temp\pdd-send-hook\out\pdd_send_v6.dll` + `injector.exe`（未改动） |
-| 安装包 | `installer/90tech-pdd-v0.8.8.0.iss`（Inno Setup 6 / ISCC） |
+| 安装包 | `installer/90tech-pdd-v0.8.9.0.iss`（Inno Setup 6 / ISCC） |
 
 ### 交付物校验
 
 | 文件 | SHA256 |
 |------|--------|
-| `dist/90科技拼多多桥接助手-Setup-0.8.8.0.exe` | `3833e9df8fc3aae5b45e1281bd02b8b1acc348da226c537bfa4e0a8659a67c20` |
+| `dist/90科技拼多多桥接助手-Setup-0.8.9.0.exe` | `bd0aa4a8f9dbbe2317dc8cade85315f9a6a376a0643dcb28e3889966378cf1ef` |
 
 ## 4. 试点口径
 
@@ -119,7 +142,7 @@ self reply published locally buyer=4764375385604 delivery=confirmed
 - [ ] 中心侧已按 `msg_id` 判重（否则 `immediate_ingress_enabled=false`）
 - [ ] 客户接受「安装会自动关闭并重新打开拼多多工作台」
 - [ ] 客户接受「首次注入需要 UAC 确认」
-- [ ] 交付包 = `Setup-0.8.8.0.exe` + 本文件 + 安装说明
+- [ ] 交付包 = `Setup-0.8.9.0.exe` + 本文件 + 安装说明
 - [ ] 记录试点店铺 ID，便于灰度
 
 ### 灰度与回滚
@@ -153,7 +176,7 @@ self reply published locally buyer=4764375385604 delivery=confirmed
    同一时刻必须出现 `self reply published locally ... delivery=confirmed`。
 5. 浮窗倒计时：AI 回复后 1–2 秒内停止。
 6. 买家发一条消息 → 本地工作台 2 秒内出现，中心 `center_accepted`。
-7. 覆盖升级 0.7.x → 0.8.8：配置/令牌/队列保留，旧进程被杀，网关 `gateway_version=0.8.8.0`。
+7. 覆盖升级 0.7.x → 0.8.9：配置/令牌/队列保留，旧进程被杀，网关 `gateway_version=0.8.9.0`。
 8. 停掉工作台再发一条 → 日志应出现 `send blocked ... retryable=True` 或 `failed`，
    而不是「已提交工作台」；恢复工作台后回复能补发/重试成功。
 9. 关闭 `command_sender_enabled` 重启 → 指令仍可发送（回落串行路径）。

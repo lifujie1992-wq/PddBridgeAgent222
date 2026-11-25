@@ -141,7 +141,8 @@ class _Session:
                  "last_health", "push_ok", "frames", "socket_state", "send_capable",
                  "lock", "actions", "worker", "failures", "next_attempt", "next_health",
                  "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at", "last_batch",
-                 "evals", "eval_ms_total", "eval_ms_max")
+                 "evals", "eval_ms_total", "eval_ms_max",
+                 "last_identity_refresh", "unresolved_since")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -151,6 +152,10 @@ class _Session:
         self.cid = cid
         self.account = ""
         self.mall_id = ""
+        # 0.8.9：工作台刚重启时页面还没吐 csid，account 会是 "?"/空。
+        # 以前只在 attach/健康探测（90s）时重读，窗口期内的发送全部 blocked。
+        self.last_identity_refresh = 0.0
+        self.unresolved_since = 0.0
         self.last_health = 0.0
         self.push_ok = False
         self.frames = 0
@@ -950,7 +955,37 @@ class PddbridgeSource:
         session.last_batch = len(frames)
         if frames:
             session.last_frame_at = time.time()
+        if self._heal_identity(session):
+            return "lost"      # 交给 worker：只重注入这一家（顺带重新解析身份）
         return "ok"
+
+    def _heal_identity(self, session: "_Session") -> bool:
+        """页面还没吐店铺/席位时每 3s 重读一次，超时就丢弃重扫。
+
+        现场（0.8.8，工作台被安装器重启后）：attach 时 account="?"，下一次重读
+        要等 90s 健康探测；这 90 秒里所有 AI 回复都被判 blocked → 买家收不到回复。
+        """
+        if session.account and session.mall_id:
+            session.unresolved_since = 0.0
+            return False
+        now = time.time()
+        if not session.unresolved_since:
+            session.unresolved_since = now
+        if now - session.last_identity_refresh >= 3.0:
+            session.last_identity_refresh = now
+            self._refresh_account_hint(session)
+            if session.account:
+                log.info("会话身份已补全 %s", session.label())
+                session.unresolved_since = 0.0
+                return False
+        if now - session.unresolved_since > 120.0:
+            self._warn_throttled(
+                "identity_unresolved:%s" % session.key(),
+                "会话 120s 仍未解析出店铺（account=%r），丢弃重扫：%s"
+                % (session.account or "", session.label()), interval=120.0)
+            session.unresolved_since = 0.0
+            return True
+        return False
 
     # ---------------- 逐店隔离：每个会话一个 poller 线程 ----------------
     def _backoff_max(self) -> float:
@@ -1336,6 +1371,8 @@ class PddbridgeSource:
                     self.sessions.append(session)
                 known.add(session.key())
                 self._refresh_account_hint(session)
+                session.last_identity_refresh = time.time()
+                session.unresolved_since = 0.0 if session.account else time.time()
                 session.last_health = time.time()
                 log.info("pddbridge 会话已挂 %s push=%s url=%s attached=%s",
                          session.label(), bool(self._push_url()),

@@ -1436,23 +1436,39 @@ class BridgeAgent:
             cfg["_effective_source"] = self._effective_source
             cfg["_command_is_expired"] = lambda cmd=cmd: self._command_expired(cmd)
             started = time.monotonic()
-            try:
-                result = self.platform.send_text(
-                    buyer_id,
-                    content,
-                    account,
-                    cfg=cfg,
-                    dry_run=bool(self.cfg.get("dry_run")),
-                )
-            except Exception as exc:
-                result = {
-                    "ok": False,
-                    "status": "indeterminate",
-                    "error": str(exc),
-                    "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
-                    "real_send": None,
-                    "via": "send_exception",
-                }
+            # 现场（0.8.8）：工作台刚重启时页面还没吐 csid，会话身份是 "?" →
+            # 发送被判 blocked(session_unresolved)，中心通常不会重投，买家就收不到
+            # 这条回复（浮窗倒计时一路跑到超时）。身份会在 3s 内自愈，所以在
+            # 这里做有限次重试，而不是把「暂时没就绪」直接当成最终结果。
+            _retry_errors = {"session_unresolved", "channel_not_ready"}
+            result: dict | Any = {}
+            for _attempt in range(3):
+                try:
+                    result = self.platform.send_text(
+                        buyer_id,
+                        content,
+                        account,
+                        cfg=cfg,
+                        dry_run=bool(self.cfg.get("dry_run")),
+                    )
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "status": "indeterminate",
+                        "error": str(exc),
+                        "error_user": "桥接发送过程异常；为避免重复发送，请人工核对会话",
+                        "real_send": None,
+                        "via": "send_exception",
+                    }
+                    break
+                _err = str((result or {}).get("error") or "") if isinstance(result, dict) else ""
+                if _err not in _retry_errors:
+                    break
+                if _attempt >= 2 or self._command_expired(cmd):
+                    break
+                log.warning("command %s send retry %d/%d after %s",
+                            command_id, _attempt + 1, 2, _err)
+                time.sleep(2.0)
             # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
             # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
             # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
