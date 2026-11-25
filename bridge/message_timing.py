@@ -127,7 +127,7 @@ def queue_metrics(events, now=None):
 # （服务端当天 35/36 轮未回复都是这个原因）。
 # 解决办法：只有当"这条消息很新、还没人回过、来源是可追溯的主动补拉"时，
 # 才把它按实时上送；真正的历史、重放、已回复的一律照旧走窗口。
-FRESH_PULL_MAX_AGE_SECONDS = float(os.environ.get("PDD_FRESH_PULL_MAX_AGE_SECONDS") or 30.0)
+FRESH_PULL_MAX_AGE_SECONDS = float(os.environ.get("PDD_FRESH_PULL_MAX_AGE_SECONDS") or 75.0)
 
 _REPLAY_MARKERS = ("spill", "replay", "restore", "local_queue")
 

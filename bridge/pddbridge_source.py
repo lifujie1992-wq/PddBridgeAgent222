@@ -118,7 +118,7 @@ class _Session:
 
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
                  "last_health", "push_ok", "frames", "socket_state", "send_capable",
-                 "lock", "actions", "worker", "failures", "next_attempt", "next_health",
+                 "lock", "actions", "send_actions", "worker", "failures", "next_attempt", "next_health",
                  "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
@@ -136,6 +136,10 @@ class _Session:
         self.send_capable = False
         self.lock = threading.Lock()
         self.actions: "queue.Queue" = queue.Queue()
+        # 发送单独排队、优先执行：不能排在补拉历史（一次可达数秒）后面。
+        # 90科技 2026-11-25：AI 回复在买家发言后 ~5s 下发，正撞上该会话的补拉，
+        # 5 秒等不到执行就被撤销，消息根本没发出却报"未收到回执"。
+        self.send_actions: "queue.Queue" = queue.Queue()
         self.worker = None
         self.failures = 0
         self.next_attempt = 0.0
@@ -314,6 +318,8 @@ class PddbridgeSource:
         # 可选直发通道（默认关）：注入 DLL 就绪时直调工作台内部发送接口，
         # 拿同步返回值；未就绪则返回 None 自动回退原 CDP 路径。
         self.direct_send = None
+        # 发送排队超时、从未执行（确定没发出）的次数
+        self.queue_timeout_count = 0
         # DLL 直发返回 OK 0 后回退页面发送的次数（排查用，进 status）
         self.direct_fallback_count = 0
         self.last_direct_fallback: dict | None = None
@@ -466,6 +472,7 @@ class PddbridgeSource:
                          if self.direct_send is not None else None),
             "msg_count": self.msg_count,
             "send_count": self.send_count,
+            "send_queue_timeouts": self.queue_timeout_count,
             # 采集是否真的在跑（injected 只代表注入成功，不代表有数据）
             "frames_total": self._frames_seen,
             "frames_last_5m": frames_5m,
@@ -568,12 +575,30 @@ class PddbridgeSource:
             key = "%s|%s" % (str(uid), str(content)[:48])
             with self._lock:
                 event.cancelled = True
+                before = len(self._act)
                 self._act = [(name, args) for name, args in self._act
                              if not (name == "send" and args[3] is event)]
+                never_dispatched = len(self._act) < before
                 if key in self._pending_sends:
                     del self._pending_sends[key]
             # 已派发到某个店铺队列的也要撤回来，否则超时后还会发出去
-            self._cancel_dispatched_send(event)
+            never_executed = self._cancel_dispatched_send(event) or never_dispatched
+            if event.result is not None:      # 撤销的同时恰好拿到了结果
+                return event.result
+            if never_executed:
+                self.queue_timeout_count += 1
+                log.warning("send queued but never executed within %.1fs uid=%s account=%s",
+                            timeout, uid, account)
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "real_send": False,
+                    "retryable": True,
+                    "not_sent": True,
+                    "via": "cdp_queue",
+                    "error": "send_queue_timeout",
+                    "error_user": "客户端发送排队超时，消息未发出（可重发）",
+                }
             return {
                 "ok": True,
                 "status": "indeterminate",
@@ -587,23 +612,30 @@ class PddbridgeSource:
         with self._lock:
             self._act.append(("reconnect", ()))
 
-    def _cancel_dispatched_send(self, event) -> None:
-        """从各店铺的动作队列里摘掉一个已超时的发送动作。"""
+    def _cancel_dispatched_send(self, event) -> bool:
+        """从各店铺的动作队列里摘掉一个已超时的发送动作。
+
+        返回 True 表示它还在排队、从未执行（= 确定没发出去）。
+        """
         with self._lock:
             sessions = list(self.sessions)
+        removed = False
         for session in sessions:
-            kept: list = []
-            while True:
-                try:
-                    item = session.actions.get_nowait()
-                except queue.Empty:
-                    break
-                name, args = item
-                if name == "send" and len(args) > 3 and args[3] is event:
-                    continue
-                kept.append(item)
-            for item in kept:
-                session.actions.put(item)
+            for q in (session.send_actions, session.actions):
+                kept: list = []
+                while True:
+                    try:
+                        item = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    name, args = item
+                    if name == "send" and len(args) > 3 and args[3] is event:
+                        removed = True
+                        continue
+                    kept.append(item)
+                for item in kept:
+                    q.put(item)
+        return removed
 
     # ---------------- 事件/状态 ----------------
     def _note_seller_reply(self, parsed: dict, hint: str = "") -> None:
@@ -662,9 +694,9 @@ class PddbridgeSource:
         if not bool(self.cfg.get("promote_fresh_pull", True)):
             return msg
         try:
-            max_age = float(self.cfg.get("fresh_pull_max_age_seconds") or 30.0)
+            max_age = float(self.cfg.get("fresh_pull_max_age_seconds") or 75.0)
         except (TypeError, ValueError):
-            max_age = 30.0
+            max_age = 75.0
         account = str(msg.get("account") or "")
         buyer = str(msg.get("buyer_id") or "")
         try:
@@ -907,6 +939,7 @@ class PddbridgeSource:
             except Exception as exc:            # 防御：worker 绝不能死
                 log.debug("session worker error %s: %s", session.label(), exc)
                 result = "error"
+            self._run_session_sends(session)
             if result == "ok":
                 if session.failures:
                     log.info("pddbridge 会话恢复 %s（连续失败 %d 次后）",
@@ -928,6 +961,7 @@ class PddbridgeSource:
             if now >= session.next_health:
                 session.next_health = now + self._health_interval()
                 self._health_check_session(session)
+                self._run_session_sends(session)
             self._stop_evt.wait(poll)
 
     def _reinject_session(self, session: _Session) -> None:
@@ -949,8 +983,24 @@ class PddbridgeSource:
                              "pddbridge 重注入失败 %s: %s（%.0fs 后重试）"
                              % (session.label(), reason, delay), interval=60.0)
 
+    def _run_session_sends(self, session: _Session) -> None:
+        """先把排队的发送全部执行掉（发送有 5 秒等待上限，补拉没有）。"""
+        while True:
+            try:
+                name, args = session.send_actions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self._do_send_action(*args)
+            except Exception as exc:
+                log.warning("session action %s failed (%s): %s", name, session.label(), exc)
+
     def _run_session_actions(self, session: _Session) -> None:
-        """在会话自己的工作线程里执行发送/拉历史，避免阻塞主循环和别的店铺。"""
+        """在会话自己的工作线程里执行发送/拉历史，避免阻塞主循环和别的店铺。
+
+        发送永远优先：每做一个补拉之前都先清空发送队列。
+        """
+        self._run_session_sends(session)
         for _ in range(4):
             try:
                 name, args = session.actions.get_nowait()
@@ -963,6 +1013,7 @@ class PddbridgeSource:
                     self._do_pull_history(*args)
             except Exception as exc:
                 log.warning("session action %s failed (%s): %s", name, session.label(), exc)
+            self._run_session_sends(session)
 
     # ---------------- 推送通道（页面直推, 免轮询） ----------------
     def _push_url(self) -> str:
@@ -1357,7 +1408,7 @@ class PddbridgeSource:
                 elif name == "pull_history":
                     self._do_pull_history(*a)
                 continue
-            session.actions.put((name, a))
+            (session.send_actions if name == "send" else session.actions).put((name, a))
             self._wake.set()
         return reconnect
 

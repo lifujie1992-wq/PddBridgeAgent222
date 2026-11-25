@@ -90,9 +90,11 @@ def test_actions_are_dispatched_to_the_matching_shop_only():
         src._act.append(("send", ("buyer1", "hi", "cs_2:200", event, 5.0, None)))
         src._act.append(("pull_history", ("buyer2", "cs_1:100", 20, 0, 0, 0, event2)))
     assert src._handle_actions() is False
-    assert a.actions.qsize() == 1 and b.actions.qsize() == 1
+    # 发送进目标店铺自己的发送队列（优先执行），拉历史进普通队列；互不串店
+    assert a.actions.qsize() == 1 and a.send_actions.qsize() == 0
+    assert b.send_actions.qsize() == 1 and b.actions.qsize() == 0
     name_a, args_a = a.actions.get_nowait()
-    name_b, _ = b.actions.get_nowait()
+    name_b, _ = b.send_actions.get_nowait()
     assert (name_a, args_a[1]) == ("pull_history", "cs_1:100")
     assert name_b == "send"
 

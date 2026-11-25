@@ -230,7 +230,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "order_gate_fail_open": bool(data.get("order_gate_fail_open", False)),
         # Phase-3：补拉到的新鲜消息按实时上送（消除 90 秒晚到）
         "promote_fresh_pull": bool(data.get("promote_fresh_pull", True)),
-        "fresh_pull_max_age_seconds": float(data.get("fresh_pull_max_age_seconds") or 30.0),
+        "fresh_pull_max_age_seconds": float(data.get("fresh_pull_max_age_seconds") or 75.0),
         "history_hold_policy": str(data.get("history_hold_policy") or "legacy"),
         "history_live_window_seconds": float(
             data["history_live_window_seconds"]
@@ -354,7 +354,7 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "order_gate_window_seconds": float(cfg.get("order_gate_window_seconds") or 86400.0),
         "order_gate_fail_open": bool(cfg.get("order_gate_fail_open", False)),
         "promote_fresh_pull": bool(cfg.get("promote_fresh_pull", True)),
-        "fresh_pull_max_age_seconds": float(cfg.get("fresh_pull_max_age_seconds") or 30.0),
+        "fresh_pull_max_age_seconds": float(cfg.get("fresh_pull_max_age_seconds") or 75.0),
         "history_hold_policy": str(cfg.get("history_hold_policy") or "legacy"),
         "history_live_window_seconds": float(
             cfg["history_live_window_seconds"]
@@ -449,7 +449,7 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "order_gate_window_seconds": 86400,
         "order_gate_fail_open": False,
         "promote_fresh_pull": True,
-        "fresh_pull_max_age_seconds": 30,
+        "fresh_pull_max_age_seconds": 75,
         "history_hold_policy": "legacy",
         "history_live_window_seconds": 90,
         "send_confirm_timeout_seconds": 10.0,
