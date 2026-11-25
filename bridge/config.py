@@ -26,7 +26,9 @@ _MIGRATIONS_V1: dict[str, Any] = {
     "poll_interval_ms": 200,
     "heartbeat_seconds": 5.0,
     "command_poll_seconds": 1.5,          # 中心长轮询 20s 会让 AI 回复排名延迟几十秒
-    "cdp_poll_interval": 1.0,
+    "cdp_poll_interval": 0.2,
+    "cdp_poll_interval_idle": 2.0,        # 店铺空闲时降到 2s/轮；20 店时这是决定性的一项
+
     "cdp_auto_fallback": True,
     "cdp_fallback_after_seconds": 60.0,
     "upload_batch_size": 500,
@@ -277,10 +279,13 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "cdp_fallback_after_seconds": float(data.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": data.get("cdp_port"),
         "cdp_poll_interval": float(data.get("cdp_poll_interval") or 0.2),
-        # 单次 CDP eval 超时（默认 3s）与每店健康探测间隔（默认 30s）。
-        # 20 店时 8s 超时会连锁拖死整片；探测也不能和取帧抢连接。
-        "cdp_eval_timeout_seconds": float(data.get("cdp_eval_timeout_seconds") or 3.0),
-        "cdp_health_interval_seconds": float(data.get("cdp_health_interval_seconds") or 30.0),
+        # 空闲店铺的轮询间隔：没有推送、上一轮也没取到帧时按这个节奏走。
+        # 20 店 × 0.2s ≈ 100 次 eval/s，会把渲染进程和 GIL 压死（表现为集体超时）；
+        # 空闲降到 2s 后总量降到 ~10 次/s，活跃店铺仍保持 0.2s 的实时性。
+        "cdp_poll_interval_idle": float(data.get("cdp_poll_interval_idle") or 2.0),
+        # 单次 CDP eval 超时：20 店并发时 3s 太紧，会让"慢"变成"失败→退避→看起来全超时"。
+        "cdp_eval_timeout_seconds": float(data.get("cdp_eval_timeout_seconds") or 6.0),
+        "cdp_health_interval_seconds": float(data.get("cdp_health_interval_seconds") or 90.0),
         "cdp_session_backoff_max_seconds": float(data.get("cdp_session_backoff_max_seconds") or 30.0),
         "cdp_rescan_seconds": float(data.get("cdp_rescan_seconds") or 20),
         "cdp_emit_history": bool(data.get("cdp_emit_history", False)),
@@ -309,6 +314,17 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
     }
     # 记录用户显式写过的键：有些默认值会在 load 时补齐，下游无法区分
     # "用户设成 90" 和 "我们补的 90"（history_live_window_seconds 就踩过）。
+    # 0.7.21：旧的默认值在 20 店并发下会把"慢"变成"集体超时"。
+    # 用户没改过（值仍等于旧默认）就跟着升级；改过的原样保留。
+    for _key, _old, _new in (
+        ("cdp_eval_timeout_seconds", 3.0, 6.0),
+        ("cdp_health_interval_seconds", 30.0, 90.0),
+    ):
+        try:
+            if abs(float(out.get(_key) or 0) - _old) < 1e-9:
+                out[_key] = _new
+        except (TypeError, ValueError):
+            out[_key] = _new
     out["_explicit_keys"] = sorted(k for k in data.keys() if not str(k).startswith("_"))
     if not out["agent_id"]:
         out["agent_id"] = (
@@ -377,8 +393,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "cdp_fallback_after_seconds": float(cfg.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": cfg.get("cdp_port"),
         "cdp_poll_interval": float(cfg.get("cdp_poll_interval") or 0.2),
-        "cdp_eval_timeout_seconds": float(cfg.get("cdp_eval_timeout_seconds") or 3.0),
-        "cdp_health_interval_seconds": float(cfg.get("cdp_health_interval_seconds") or 30.0),
+        "cdp_poll_interval_idle": float(cfg.get("cdp_poll_interval_idle") or 2.0),
+        "cdp_eval_timeout_seconds": float(cfg.get("cdp_eval_timeout_seconds") or 6.0),
+        "cdp_health_interval_seconds": float(cfg.get("cdp_health_interval_seconds") or 90.0),
         "cdp_session_backoff_max_seconds": float(cfg.get("cdp_session_backoff_max_seconds") or 30.0),
         "cdp_emit_history": bool(cfg.get("cdp_emit_history", False)),
         "send_via_dll": bool(cfg.get("send_via_dll", False)),
@@ -476,8 +493,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "cdp_fallback_after_seconds": 60,
         "cdp_port": None,
         "cdp_poll_interval": 0.2,
-        "cdp_eval_timeout_seconds": 3.0,
-        "cdp_health_interval_seconds": 30.0,
+        "cdp_poll_interval_idle": 2.0,
+        "cdp_eval_timeout_seconds": 6.0,
+        "cdp_health_interval_seconds": 90.0,
         "cdp_session_backoff_max_seconds": 30.0,
         "cdp_emit_history": False,
         "cdp_rescan_seconds": 20,

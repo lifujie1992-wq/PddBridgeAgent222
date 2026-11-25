@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import random
 import secrets
 import sys
 import threading
@@ -119,7 +120,7 @@ class _Session:
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
                  "last_health", "push_ok", "frames", "socket_state", "send_capable",
                  "lock", "actions", "worker", "failures", "next_attempt", "next_health",
-                 "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at")
+                 "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at", "last_batch")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -141,6 +142,7 @@ class _Session:
         self.next_attempt = 0.0
         self.next_health = 0.0
         self.last_frame_at = 0.0
+        self.last_batch = 0        # 上一轮取到几帧（worker 用它决定活跃/空闲节奏）
         self.degraded_at = 0.0
         self.sender_csid = ""
         self.sender_csid_at = 0.0
@@ -829,6 +831,7 @@ class PddbridgeSource:
 
     def _pump_session(self, session: _Session) -> str:
         """LISTENING 单轮: 取帧 + 判活。返回 ok | lost | error。"""
+        session.last_batch = 0
         try:
             frames, hooked, lossless = self._drain(session)
         except Exception as exc:
@@ -852,6 +855,7 @@ class PddbridgeSource:
         if lossless and not frame_error:
             self._ack(session, len(frames))
         session.frames += len(frames)
+        session.last_batch = len(frames)
         if frames:
             session.last_frame_at = time.time()
         return "ok"
@@ -890,12 +894,26 @@ class PddbridgeSource:
         return delay
 
     def _session_worker(self, session: _Session) -> None:
-        """单店取帧循环。一家店卡住/超时只退避它自己，不影响其他店铺。"""
+        """单店取帧循环。一家店卡住/超时只退避它自己，不影响其他店铺。
+
+        节奏自适应：活跃店铺 0.2s 一轮保证实时；空闲（没推送、上轮没取到帧）
+        降到 cdp_poll_interval_idle（默认 2s）。20 店时两者相差 10 倍——
+        原来 20×5=100 次 eval/s 会把渲染进程和 GIL 压死，表现就是集体超时。
+        """
         poll = 0.2
         try:
             poll = max(0.05, float(self.cfg.get("cdp_poll_interval") or 0.2))
         except (TypeError, ValueError):
             poll = 0.2
+        idle_poll = 2.0
+        try:
+            idle_poll = max(poll, float(self.cfg.get("cdp_poll_interval_idle") or 2.0))
+        except (TypeError, ValueError):
+            idle_poll = 2.0
+        # 启动错峰：20 个 worker 同时醒会同刻抢 CDP，错开 0~1 轮
+        rng = random.Random(hash(session.key()) & 0xFFFFFFFF)
+        self._stop_evt.wait(poll * rng.random())
+        idle_rounds = 0
         while not self._stop_evt.is_set() and session in self.sessions:
             self._run_session_actions(session)
             now = time.time()
@@ -928,7 +946,16 @@ class PddbridgeSource:
             if now >= session.next_health:
                 session.next_health = now + self._health_interval()
                 self._health_check_session(session)
-            self._stop_evt.wait(poll)
+            # 这轮取到帧 = 活跃；连续取不到就退到空闲节奏
+            if getattr(session, "last_batch", 0) > 0:
+                idle_rounds = 0
+                wait = poll
+            else:
+                idle_rounds = min(idle_rounds + 1, 6)
+                # 前 3 轮仍按活跃节奏（消息刚处理完的余波），之后退到空闲
+                wait = poll if idle_rounds <= 3 else idle_poll
+            # 抖动 ±20%：避免 20 家店长期同相撞车
+            self._stop_evt.wait(wait * (0.8 + 0.4 * rng.random()))
 
     def _reinject_session(self, session: _Session) -> None:
         """只重注入当前会话；失败则退避，不拉黑整个通道。"""
