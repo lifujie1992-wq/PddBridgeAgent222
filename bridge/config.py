@@ -298,6 +298,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "recv_mode": int(data.get("recv_mode") or 0),
         # 全槽位探针在 3.5.0.40 会崩客户端（未初始化临界区）；默认走导出 detour。
         "recv_probe": bool(data.get("recv_probe", False)),
+        "raw_frame_dump_path": str(data.get("raw_frame_dump_path") or ""),
         # auto=全槽位嗅探（默认，进程级）；detour=导出 detour（只收心跳/出口帧）
         "recv_engine": str(data.get("recv_engine") or "auto"),
         # 接收管道名后缀（对应 DLL 侧 PDD_BRIDGE_PIPE_SUFFIX，空=默认管道）。
@@ -387,6 +388,7 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "recv_slot": int(cfg.get("recv_slot") or -1),
         "recv_mode": int(cfg.get("recv_mode") or 0),
         "recv_probe": bool(cfg.get("recv_probe", False)),
+        "raw_frame_dump_path": str(cfg.get("raw_frame_dump_path") or ""),
         "recv_engine": str(cfg.get("recv_engine") or "auto"),
         "recv_pipe_suffix": str(cfg.get("recv_pipe_suffix") or ""),
         "recv_pipe_name": str(cfg.get("recv_pipe_name") or ""),
@@ -484,6 +486,7 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "recv_slot": -1,
         "recv_mode": 0,
         "recv_probe": False,
+        "raw_frame_dump_path": "",
         "recv_engine": "auto",
         "recv_pipe_suffix": "",
         "recv_pipe_name": "",

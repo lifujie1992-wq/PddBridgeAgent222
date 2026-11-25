@@ -119,7 +119,7 @@ class _Session:
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
                  "last_health", "push_ok", "frames", "socket_state", "send_capable",
                  "lock", "actions", "worker", "failures", "next_attempt", "next_health",
-                 "last_frame_at", "degraded_at")
+                 "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -142,6 +142,8 @@ class _Session:
         self.next_health = 0.0
         self.last_frame_at = 0.0
         self.degraded_at = 0.0
+        self.sender_csid = ""
+        self.sender_csid_at = 0.0
 
     def key(self) -> str:
         # 多个 middle_panel 目标可能共用同一个 executionContextId 和 URL（实测 7 个目标
@@ -534,7 +536,9 @@ class PddbridgeSource:
     def send_image(self, uid, image_path, account, *, csid=None) -> dict:
         """发本地图片（DLL SendImageMsg）。没有页面兼容路径，不可用就明确报错。"""
         if self.direct_send is not None:
-            result = self.direct_send.send_image(uid, image_path, csid, account)
+            # 和文字发送同一口径补客服身份：DLL 拿不到 sender label 就返回 OK 0
+            direct_csid = csid or self._page_sender_csid(self._session_for_send(account))
+            result = self.direct_send.send_image(uid, image_path, direct_csid, account)
             if result is not None:
                 self.send_count += 1
                 log.info("image send uid=%s account=%s ok=%s cost=%sms via=%s",
@@ -711,20 +715,43 @@ class PddbridgeSource:
             value = 3.0
         return max(0.5, min(value, 8.0))
 
+    # 兜底表达式：注入脚本太旧（没有 __pddBridge_csid）时用，和 inject.js 同一套取值
     _PAGE_SENDER_CSID_EXPR = (
         "(function(){try{var a=document.getElementById('app');var vm=a&&a.__vue__;"
         "var u=vm&&vm.$store&&vm.$store.state.userInfo;"
         "return (u&&(u.nickname||u.username))||null;}catch(e){return null;}})()"
     )
+    _CSID_CACHE_SECONDS = 120.0
 
     def _page_sender_csid(self, session: _Session) -> str:
-        """页面当前客服身份，与 __pddBridge_sendText 缺省 csid 同一口径；取不到返回空串。"""
-        try:
-            value = self._eval(session, self._PAGE_SENDER_CSID_EXPR)
-        except Exception as exc:
-            log.debug("读取页面客服身份失败: %s", exc)
+        """页面当前客服身份（PDD 发送要求的 sender label），取不到返回空串。
+
+        权威口径在注入层：`window.__pddBridge_csid()` 与 `__pddBridge_sendText`
+        内部完全相同。传 `cs_mall:uid` 这种账号串给 DLL，pdd 会直接返回 false
+        （现场"直发 OK 0、一条也没发出去"就是这个）。
+        """
+        if session is None:
             return ""
-        return str(value).strip() if isinstance(value, (str, int)) and str(value).strip() else ""
+        cached = getattr(session, "sender_csid", "")
+        cached_at = getattr(session, "sender_csid_at", 0.0)
+        if cached and time.time() - cached_at < self._CSID_CACHE_SECONDS:
+            return cached
+        value = ""
+        for expr in ("(window.__pddBridge_csid ? window.__pddBridge_csid() : null)",
+                     self._PAGE_SENDER_CSID_EXPR):
+            try:
+                got = self._eval(session, expr)
+            except Exception as exc:
+                log.debug("读取页面客服身份失败: %s", exc)
+                continue
+            text = str(got).strip() if isinstance(got, (str, int)) and str(got).strip() else ""
+            if text and text.lower() not in {"null", "undefined", "none"}:
+                value = text
+                break
+        if value:
+            session.sender_csid = value
+            session.sender_csid_at = time.time()
+        return value
 
     def _eval(self, session: _Session, expr, timeout: float | None = None):
         """会话内串行 eval。--timeout 缺省用 cdp_eval_timeout_seconds（默认 3s）。
@@ -1477,6 +1504,17 @@ class PddbridgeSource:
         解析/去重/待确认表都不是线程安全的，且一条帧里可能触发发送回执确认；
         用一把粗粒度锁即可（每帧只做纯 CPU 工作，不阻塞 IO）。
         """
+        # 排障开关：把收到的原始帧原样追加到文件（默认关）。
+        # 图片/商品卡这类消息的 type 和附加字段只能从原始帧里看。
+        dump = str(self.cfg.get("raw_frame_dump_path") or "").strip()
+        if dump:
+            try:
+                with open(dump, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(
+                        {"at": time.time(), "chan": e.get("chan"), "data": e.get("data")},
+                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
         with self._frame_lock:
             self._frames_seen += 1
             self._last_frame_at = time.time()
