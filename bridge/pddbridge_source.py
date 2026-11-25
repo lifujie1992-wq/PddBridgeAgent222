@@ -91,6 +91,12 @@ class _SendWaiter(threading.Event):
     cancelled = False
     is_expired = None
     deadline = 0.0
+    # 0.8.3：区分“排队没轮到执行”和“执行了但没回执”。
+    # 两者以前都返回 indeterminate，导致：没发的消息被当成“已提交”（丢消息），
+    # 真发了的消息被当成“未确认”（浮窗倒计时永远不停）。
+    started = False
+    started_at = 0.0
+    accepted = False
 
     def expired(self):
         return (self.cancelled or time.monotonic() >= self.deadline
@@ -103,6 +109,20 @@ def _to_buyer_uid(parsed) -> str:
     message = msg.get("message") or {}
     return (buyer_uid([message.get("to"), message.get("from"), msg.get("to")], seller_id(parsed) or "")
             or str(parsed.get("uid") or ""))
+
+
+def _plausible_account(value) -> str:
+    """把“看起来像客服账号”的值规范化，其余一律当空。
+
+    回执帧里的店铺可能还是页面占位值（例如会话 account=\"?\"）。它不是
+    “另一家店”，而是“还不知道是哪家店”—— 当成空，才能让内容兜底匹配生效；
+    当成有效值会让 0.8 的 (account, uid, content) 严格 key 永远配不上。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    canonical = _canonical_account(text)
+    return canonical if ACCOUNT_RE.fullmatch(canonical) else ""
 
 
 def _seat_uid(seller) -> str:
@@ -573,21 +593,54 @@ class PddbridgeSource:
             self._act.append(("send", (str(uid), str(content), str(account or ""), event, timeout, csid)))
         event.wait(timeout)
         if event.result is None:
+            executed = bool(getattr(event, "started", False))
+            accepted = bool(getattr(event, "accepted", False))
             key = (str(account), str(uid), str(content))
             with self._lock:
-                event.cancelled = True
                 self._act = [(name, args) for name, args in self._act
                              if not (name == "send" and args[3] is event)]
                 if key in self._pending_sends:
                     del self._pending_sends[key]
-            # 已派发到某个店铺队列的也要撤回来，否则超时后还会发出去
-            self._cancel_dispatched_send(event)
+            if not executed:
+                # 还没轮到执行：撤回去并明确说“没发”。不能报“已提交”——
+                # 那样中心不会重试，客服以为发了，买家什么都没收到。
+                event.cancelled = True
+                self._cancel_dispatched_send(event)
+                log.warning("send not executed within %.1fs (still queued) uid=%s account=%s",
+                            timeout, uid, account)
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "real_send": False,
+                    "retryable": True,
+                    "via": "cdp_queued",
+                    "error": "send_not_executed",
+                    "error_user": "工作台忙，这条回复没有发出去；可以重试",
+                }
+            if accepted:
+                # 页面已受理（__pddBridge_sendText 返回 ok），只是回执没等到。
+                # 撤回会让“已发出的”变成“没发出”，所以不撤。
+                log.warning("send accepted but no echo within %.1fs uid=%s account=%s",
+                            timeout, uid, account)
+                return {
+                    "ok": True,
+                    "status": "accepted",
+                    "real_send": True,
+                    "delivery_uncertain": True,
+                    "echo_missing": True,
+                    "via": "cdp_accepted",
+                    "buyer_id": str(uid),
+                    "error_user": "工作台已受理，但没等到发送回执（可能已发出），请核对会话",
+                }
+            event.cancelled = True
+            log.warning("send started but not finished within %.1fs uid=%s account=%s",
+                        timeout, uid, account)
             return {
-                "ok": True,
+                "ok": False,
                 "status": "indeterminate",
-                "real_send": False,
+                "real_send": None,
                 "via": "cdp",
-                "error_user": "已提交工作台但未收到发送回执，请人工核对会话",
+                "error_user": "发送已开始但结果未知，请人工核对会话",
             }
         return event.result
 
@@ -1520,13 +1573,20 @@ class PddbridgeSource:
     def _do_send_action(self, uid, content, account, event, timeout, csid) -> None:
         session = self._session_for_send(account)
         if session is None:
+            # 现场表现：工作台刚重启/还没进会话时 account 是 "?"，这里会选不到会话。
+            # 消息确实没发出去 → 必须 retryable，否则中心不重投，这条回复就丢天。
+            log.warning("send blocked (session unresolved) uid=%s account=%s sessions=%s",
+                        uid, account, [(s.account, s.mall_id) for s in self.sessions])
             event.result = {
                 "ok": False, "status": "blocked", "real_send": False, "via": "cdp_blocked",
-                "error_user": "在线 %d 个账号但无法确定目标会话，请人工在对应店铺窗口确认"
+                "retryable": True, "error": "session_unresolved",
+                "error_user": "工作台会话还没就绪（%d 个账号在线），这条回复没有发出去，稍后重试"
                               % len(self.sessions),
             }
             event.set()
             return
+        event.started = True
+        event.started_at = time.monotonic()
         self._do_send(session, uid, content, account, event, timeout, csid)
 
     # ---------------- 守护线程主循环 ----------------
@@ -1631,19 +1691,20 @@ class PddbridgeSource:
     def _handle_frame_locked(self, e: dict, session: _Session | None = None) -> None:
         hint = session.account if session is not None else ""
         if e.get("dir") == "send_error":
+            hint = _plausible_account(hint)
             key = (hint, str(e.get("uid") or ""), str(e.get("content") or ""))
             content = str(e.get("content") or "")
             with self._lock:
                 pending = self._pending_sends.get(key)
-                if pending and hint and pending.get("account") != hint:
+                if pending and hint and _plausible_account(pending.get("account")) != hint:
                     pending = None
                 if not pending and content:
                     # key 带上 account 之后，命令没带 account / 只给商城号的事件
-                    # 会整条配不上。这里按内容唯一兜底，任意一侧为空即视为可用。
+                    # 会整条配不上。这里按内容唯一兜底：不可用的 account 一律当空。
                     matches = [(item_key, row) for item_key, row in self._pending_sends.items()
                                if str(row.get("content") or "") == content
-                               and (not hint or not row.get("account")
-                                    or row.get("account") == hint)]
+                               and (not hint or not _plausible_account(row.get("account"))
+                                    or _plausible_account(row.get("account")) == hint)]
                     if len(matches) == 1:
                         key, pending = matches[0]
                 if pending:
@@ -1942,8 +2003,10 @@ class PddbridgeSource:
             event.set()
             return
         if session not in self.sessions or self.state != LISTENING:
+            log.warning("send failed (channel not ready) uid=%s state=%s", uid, self.state)
             event.result = {
                 "ok": False, "status": "failed", "real_send": False, "via": "cdp",
+                "retryable": True, "error": "channel_not_ready",
                 "error_user": "CDP 通道未就绪，请确认 PDD 商家工作台已打开",
             }
             event.set()
@@ -1959,9 +2022,12 @@ class PddbridgeSource:
 
             target = mall_id_from_account(account)
             if target and str(info.get("globalMallId")) != str(target):
+                log.warning("send blocked (mall mismatch) uid=%s target=%s page=%s",
+                            uid, target, info.get("globalMallId"))
                 event.result = {
                     "ok": False, "status": "blocked", "real_send": False, "via": "cdp_blocked",
-                    "error_user": "当前工作台登录的店铺与目标账号不一致",
+                    "retryable": True, "error": "mall_mismatch",
+                    "error_user": "当前工作台登录的店铺与目标账号不一致，这条回复没有发出去",
                     "mall_id": info.get("globalMallId"), "buyer_id": uid,
                 }
                 event.set()
@@ -2029,6 +2095,7 @@ class PddbridgeSource:
             return
         # Pending is registered before eval so an immediate native echo can
         # confirm it while the CDP call is still returning.
+        event.accepted = True
         log.info("send accepted uid=%s account=%s csid=%s (等待回执)", uid, account, r.get("csid") or csid)
 
     def _match_pending_send(self, p: dict) -> dict | None:
@@ -2049,7 +2116,7 @@ class PddbridgeSource:
             return
         if (p.get("obj") or {}).get("result") not in (None, "ok"):
             return
-        receipt_account = self._account_for_frame(p.get("obj") or {}, account_hint)
+        receipt_account = _plausible_account(self._account_for_frame(p.get("obj") or {}, account_hint))
         to_uid = _to_buyer_uid(p)
         content = str(p.get("content") or "")
         key = (receipt_account, to_uid, content)
@@ -2060,14 +2127,21 @@ class PddbridgeSource:
             if not pend:
                 # 回执帧的 to.uid 可能是席位自己的 uid → 按内容唯一匹配兜底，
                 # 否则老板收到的“已发送确认”会全部配不上而报未确认。
-                # 0.8 把 key 改成带 account 后，命令没带 account / 页面只给商城号
-                # 会整条配不上（已复现：pending 留 5s 后判 indeterminate）。
-                # 所以兜底不能要求 account 完全相等：任意一侧为空即可用。
+                # 兜底不要求 account 完全相等：不可用（空/占位值）即视为可用，
+                # 两侧都是有效账号且不同时才算不同会话（不跨店误确认）。
                 matches = [(item_key, row) for item_key, row in self._pending_sends.items()
                            if str(row.get("content") or "") == content
-                           and (not receipt_account or not row.get("account")
-                                or row.get("account") == receipt_account)]
+                           and (not receipt_account
+                                or not _plausible_account(row.get("account"))
+                                or _plausible_account(row.get("account")) == receipt_account)]
                 if len(matches) != 1:
+                    # 观测性：不匹配时把可断言的现场打出来（限频）。否则现场只能
+                    # 看到“干等 5s 后 indeterminate”，没法定位是哪一侧的 key 不对。
+                    self._warn_throttled(
+                        "send_receipt_unmatched",
+                        "回执未匹配: account=%r uid=%r content=%r pending=%d matches=%d"
+                        % (receipt_account, to_uid, content[:32],
+                           len(self._pending_sends), len(matches)))
                     return
                 key, pend = matches[0]
             del self._pending_sends[key]
@@ -2202,7 +2276,14 @@ def send_text_cdp(
             "error_user": "工作台发送通道未就绪",
         }
     try:
-        return src.send_and_wait(buyer_id, content, account, timeout=5.0,
+        try:
+            confirm_timeout = float(cfg.get("send_confirm_timeout_seconds") or 10.0)
+        except (TypeError, ValueError):
+            confirm_timeout = 10.0
+        # 5s 太短：排队 + 页面 eval + 等回执，正常工作台也会踩线，
+        # 一超时就会把“已发出的”报成未确认（现场：一半回复 indeterminate）。
+        confirm_timeout = max(5.0, min(confirm_timeout, 30.0))
+        return src.send_and_wait(buyer_id, content, account, timeout=confirm_timeout,
                                  is_expired=cfg.get("_command_is_expired"))
     except Exception as exc:
         log.warning("send_text_cdp error: %s", exc)

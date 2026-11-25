@@ -30,31 +30,58 @@ WORKBENCH_EXE = "pddworkbench.exe"
 
 
 def resolve_tool(value: str | None, filename: str, dev_default: str,
-                 alternates: tuple[str, ...] = ()) -> str:
+                 alternates: tuple[str, ...] = (), roots: list | None = None) -> str:
     """解析 DLL/注入器路径：配置值存在则用；冻结安装用 exe 同目录；
     都没有才回退开发机默认路径。客户机装包后无需改配置。
 
     alternates：同目录下的备选文件名。原生接收只在 pdd_send_v5.dll 里（v3 无 recv 管道），
     安装包里可能叫 v5 而老配置写的是 v3，所以两种都要找。
+
+    升级场景：老配置里的 pdd_dll_path 可能还指着上一版/开发机上的
+    pdd_send_v*.dll。旧 DLL 会让每次发送先失败一次（OK 0）再回退页面 ——
+    现场实测每条约白丢 2 秒并刷警告。同一文件名族里安装包自带的更新就用
+    安装包的；自定义文件名（非 pdd_send_v*）一律尊重配置。
     """
     from pathlib import Path
     import sys
-    if value:
-        try:
-            if Path(value).exists():
-                return value
-        except OSError:
-            pass
     names = (filename, *alternates)
-    roots = []
-    if getattr(sys, "frozen", False):
-        roots.append(Path(sys.executable).resolve().parent)
-    roots.append(Path(__file__).resolve().parent.parent)
+    if roots is None:
+        roots = []
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+        roots.append(Path(__file__).resolve().parent.parent)
+    packaged = None
     for root in roots:
         for name in names:
-            cand = root / name
+            cand = Path(root) / name
             if cand.exists():
-                return str(cand)
+                packaged = cand
+                break
+        if packaged is not None:
+            break
+    configured = None
+    if value:
+        try:
+            cand = Path(value)
+            if cand.exists():
+                configured = cand
+        except OSError:
+            configured = None
+    if configured is not None:
+        try:
+            family = {name.lower() for name in names}
+            same_family = configured.name.lower() in family or configured.name.lower().startswith("pdd_send_v")
+            if (packaged is not None and same_family
+                    and configured.resolve() != packaged.resolve()
+                    and configured.stat().st_mtime < packaged.stat().st_mtime - 60):
+                log.warning("配置里的 %s 比安装包里的旧，改用安装包版本：%s -> %s",
+                            configured.name, configured, packaged)
+                return str(packaged)
+        except OSError:
+            pass
+        return str(configured)
+    if packaged is not None:
+        return str(packaged)
     return value or dev_default
 
 

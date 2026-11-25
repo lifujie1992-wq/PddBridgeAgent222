@@ -1468,11 +1468,12 @@ class BridgeAgent:
                     result["status"] = "sent"
                     result["real_send"] = True
             duration = time.monotonic() - started
-            log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
+            _res = result if isinstance(result, dict) else {}
+            log.info("command %s send done in %.2fs status=%s real_send=%s via=%s retryable=%s err=%s",
                      command_id, duration,
-                     str((result or {}).get("status") or "") if isinstance(result, dict) else "",
-                     (result or {}).get("real_send") if isinstance(result, dict) else None,
-                     str((result or {}).get("via") or "") if isinstance(result, dict) else "")
+                     str(_res.get("status") or ""), _res.get("real_send"),
+                     str(_res.get("via") or ""), _res.get("retryable"),
+                     str(_res.get("error") or _res.get("error_user") or "")[:80])
             # 把这次回复写进本地会话，浮窗倒计时才会停（插件日志没有卖家消息）
             self._publish_self_reply(account, buyer_id, content, result,
                                      extra.get("images") if extra else None)

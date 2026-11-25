@@ -103,3 +103,102 @@ def test_send_error_releases_pending_without_account():
                                  "content": "hello", "error": "rejected"})
     assert event.result and event.result["status"] == "failed"
     assert not source._pending_sends
+
+
+def test_receipt_matches_when_page_account_is_placeholder():
+    """页面会话还没解析出店铺时 account 是 "?"，不是“另一家店”。
+
+    现场（0.8.2 验收）：工作台刚重启，session.account="?"，
+    _account_for_frame 返回 "?" → 严格 key 与兜底都配不上 → 干等 5s 报
+    indeterminate，但消息其实已经发出去了。
+    """
+    source = _bare_source()
+    source.sessions = [SimpleNamespace(account="?", mall_id="1")]
+    event = _register(source, "cs_1:2", "hello")
+    source._handle_send_receipt(_receipt("hello", mall_id="1"), account_hint="?")
+    assert event.result and event.result["status"] == "confirmed"
+    assert not source._pending_sends
+
+
+def test_placeholder_account_does_not_cross_match_two_shops():
+    """"?" 不能把两家店的同名待确认项混在一起。"""
+    source = _bare_source()
+    source.sessions = [SimpleNamespace(account="?", mall_id="1")]
+    first = _register(source, "cs_1:2", "hello", uid="b-1")
+    second = _register(source, "cs_3:4", "hello", uid="b-2")
+    source._handle_send_receipt(_receipt("hello", mall_id="1"), account_hint="?")
+    assert first.result is None and second.result is None, "多义时必须放弃，不能猜"
+    assert len(source._pending_sends) == 2
+
+
+# ------------------------------------------------- 排队没执行 vs 执行了没回执
+def _send_source():
+    source = _bare_source()
+    source._thread = SimpleNamespace(is_alive=lambda: True)
+    return source
+
+
+def test_queued_send_that_never_ran_reports_failed_and_retryable():
+    """没轮到执行就不能报“已提交”：中心不会重试，买家什么都收不到。"""
+    source = _send_source()
+    result = source.send_and_wait("buyer-1", "hello", "cs_1:2", timeout=0.05)
+    assert result["status"] == "failed"
+    assert result["real_send"] is False
+    assert result["retryable"] is True
+    assert result["error"] == "send_not_executed"
+
+
+def test_page_accepted_without_echo_reports_accepted():
+    """页面受理了、回执没等到：不能撤销（撤销=把已发出的变成没发出），
+    也不能一直 indeterminate（浮窗倒计时永远不停）。"""
+    import threading
+    import time
+
+    source = _send_source()
+
+    def mark():
+        time.sleep(0.05)
+        with source._lock:
+            acts, source._act = source._act, []
+        for name, args in acts:
+            if name == "send":
+                args[3].started = True
+                args[3].accepted = True
+
+    threading.Thread(target=mark, daemon=True).start()
+    result = source.send_and_wait("buyer-1", "hello", "cs_1:2", timeout=0.3)
+    assert result["status"] == "accepted"
+    assert result["real_send"] is True
+    assert result["delivery_uncertain"] is True
+    assert result["echo_missing"] is True
+
+
+def test_started_but_not_accepted_stays_indeterminate():
+    import threading
+    import time
+
+    source = _send_source()
+
+    def mark():
+        time.sleep(0.05)
+        with source._lock:
+            acts, source._act = source._act, []
+        for name, args in acts:
+            if name == "send":
+                args[3].started = True
+
+    threading.Thread(target=mark, daemon=True).start()
+    result = source.send_and_wait("buyer-1", "hello", "cs_1:2", timeout=0.3)
+    assert result["status"] == "indeterminate"
+    assert result["real_send"] is None
+
+
+def test_unresolved_session_block_is_retryable():
+    """工作台刚重启、页面 account 还是 "?" 时选不到会话：消息确实没发，
+    必须 retryable，否则中心不重投，这条回复就丢了（现场“有的没实际发出”）。"""
+    source = _bare_source()
+    event = pddbridge_source._SendWaiter()
+    source._do_send_action("buyer-1", "hello", "cs_1:2", event, 5.0, None)
+    assert event.result["status"] == "blocked"
+    assert event.result["retryable"] is True
+    assert event.result["error"] == "session_unresolved"
