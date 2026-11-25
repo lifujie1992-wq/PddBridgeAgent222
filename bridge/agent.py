@@ -1084,6 +1084,10 @@ class BridgeAgent:
                          str((result or {}).get("status") or "") if isinstance(result, dict) else "",
                          (result or {}).get("real_send") if isinstance(result, dict) else None,
                          str((result or {}).get("via") or "") if isinstance(result, dict) else "")
+                # 浮窗/工作台的倒计时靠“本地会话里有没有卖家回复”来清零；插件日志
+                # 只有 buyer_msg，平台回显也不一定抓得到 —— 所以自己发的这条必须
+                # 主动补写进本地会话，否则 AI 明明回了、买家也收到了，倒计时还在走。
+                self._publish_self_reply(account, buyer_id, content, result)
             if not isinstance(result, dict):
                 result = {"ok": bool(result), "raw_result": str(result or "")}
             else:
@@ -1112,6 +1116,56 @@ class BridgeAgent:
             "text": str(content or ""),
             "ts": time.time(),
         })
+
+    def _publish_self_reply(self, account: str, buyer_id: str, content: str,
+                            result: dict | None = None) -> None:
+        """把自己发出去的回复补写进本地会话（只推本机工作台，不上传中心）。
+
+        0.7.6 的本地会话只从插件日志收 buyer_msg，卖家方向没有来源：
+        AI 回复成功、买家也收到了，浮窗倒计时却一直走到超时。
+        """
+        if not self.cfg.get("dual_write_local_workbench", True):
+            return
+        delivery = getattr(self, "_local_delivery", None)
+        q = getattr(self, "_local_ingest_queue", None)
+        if delivery is None and q is None:
+            return
+        res = result if isinstance(result, dict) else {}
+        if str(res.get("via") or "") == "dry_run":
+            return
+        ok = bool(res.get("ok"))
+        if not ok and str(res.get("status") or "").lower() not in {"indeterminate", "accepted"}:
+            return   # 明确失败的不写，避免把“没发出去”当成已回复
+        text = str(content or "").strip()
+        if not text:
+            return
+        now = time.time()
+        event = {
+            "event_id": "selfsend-%s-%s" % (str(buyer_id or ""), int(now * 1000)),
+            "platform": self.platform.name,
+            "account": str(account or ""),
+            "buyer_id": str(buyer_id or ""),
+            "role": "mall_cs",
+            "content": text,
+            "ts": now,
+            "msg_id": str(res.get("msg_id") or ""),
+            # 0.7.6 的倒计时只认 confirmed/sent/delivered（accepted 不算），
+            # 页面受理（ok=True）就按已回复处理：买家实际收不到的概率远低于
+            # “回执丢了导致倒计时永远不走”的代价。
+            "delivery_status": "confirmed" if ok else "indeterminate",
+            "source": "bridge_self_send",
+            "is_history": False,
+            "captured_at_ms": int(now * 1000),
+        }
+        try:
+            if delivery is not None:
+                delivery.enqueue(event)
+            else:
+                q.put_nowait(event)
+            log.info("self reply published locally buyer=%s delivery=%s",
+                     buyer_id, event["delivery_status"])
+        except Exception as exc:
+            log.debug("self reply publish skipped: %s", exc)
 
     def _classify_sent_by(self, msg: dict) -> str:
         """mall_cs 消息是「中心指令/AI 发出的」(agent) 还是「人在客户端发的」(human)；不确定则空。"""
