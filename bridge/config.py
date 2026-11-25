@@ -188,6 +188,38 @@ def default_config_path(platform: str = "pdd") -> Path:
     return Path(__file__).resolve().parent.parent / name
 
 
+def as_bool(value: Any, default: bool = False) -> bool:
+    """JSON 里的布尔要按字面解析。
+
+    `bool("false")` 是 True —— 手改过的配置、模板生成的字符串都会把一个
+    默认关的开关变成默认开（这个坑在 allow_ui_fallback 上已经有实例）。
+    agent.py 解析同类值时用的就是这套字符串判定。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _shop_id_allowlist(value: Any) -> list[str]:
+    """灰度店铺白名单：只接受明确的字符串列表，其余一律视为空（fail closed）。
+
+    缺失键、`[]`、字符串、数字、`None` 都等于**关闭**；绝不接受"除黑名单外全放"，
+    也不接受把 `"mall_123"` 这种裸字符串当成单元素列表。
+    """
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for item in value:
+        shop_id = str(item or "").strip()
+        if shop_id and shop_id not in out:
+            out.append(shop_id)
+    return out
+
+
 def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, Any]:
     # Detect platform from filename when path given.
     cfg_path = path
@@ -234,6 +266,27 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "websocket_path": str(data.get("websocket_path") or "/api/bridge/v1/ws"),
         "websocket_max_inflight": int(data.get("websocket_max_inflight") or 64),
         "upload_drain_budget_seconds": float(data.get("upload_drain_budget_seconds") or 3.0),
+        # 两个 P0 时延特性的开关。**owner 2026-09-21 明确决定「默认全开」**
+        # （不是仓库默认的 fail-closed 白名单），所以这里默认 True；为了仍然能
+        # 一键回退 / 单店回退，判定顺序固定为：
+        #   1) *_enabled = false                -> 全关（回到改动前的行为）
+        #   2) 店铺在 *_disabled_shop_ids 里      -> 只关这个店
+        #   3) *_shop_ids 非空                    -> 只有命中的店铺开（做窄灰度用）
+        #   4) 否则                              -> 开
+        #   immediate_ingress 命中时：买家消息不再被订单上下文门控扣住，原始消息
+        #     立即上传，订单上下文随后按同一个 msg_id 补发一条增强事件；中心按
+        #     msg_id 判重，只有首次插入才会入队 AI 任务，不会二次回复。
+        #   command_sender 命中时：出站发送交给并发发送池，取指令循环不再被上一条
+        #     的发送确认超时（默认 10s）占住；同一买家仍由逐会话锁保证有序。
+        "immediate_ingress_enabled": as_bool(data.get("immediate_ingress_enabled"), True),
+        "immediate_ingress_shop_ids": _shop_id_allowlist(data.get("immediate_ingress_shop_ids")),
+        "immediate_ingress_disabled_shop_ids": _shop_id_allowlist(
+            data.get("immediate_ingress_disabled_shop_ids")),
+        "command_sender_enabled": as_bool(data.get("command_sender_enabled"), True),
+        "command_sender_shop_ids": _shop_id_allowlist(data.get("command_sender_shop_ids")),
+        "command_sender_disabled_shop_ids": _shop_id_allowlist(
+            data.get("command_sender_disabled_shop_ids")),
+        "command_sender_workers": int(data.get("command_sender_workers") or 6),
         "outgoing_dedup_seconds": float(data.get("outgoing_dedup_seconds") or 60.0),
         # tanyu_logs 为主时，用 CDP 周期回拉历史，补上“会话未激活→拼多多不推送”的消息
         "history_pull_seconds": float(data.get("history_pull_seconds") or 0),
@@ -370,6 +423,13 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "platform_version": cfg.get("platform_version"),
         "poll_interval_ms": cfg.get("poll_interval_ms"),
         "heartbeat_seconds": cfg.get("heartbeat_seconds"),
+        "command_sender_enabled": cfg.get("command_sender_enabled", True),
+        "command_sender_shop_ids": cfg.get("command_sender_shop_ids", []),
+        "command_sender_disabled_shop_ids": cfg.get("command_sender_disabled_shop_ids", []),
+        "command_sender_workers": cfg.get("command_sender_workers", 6),
+        "immediate_ingress_enabled": cfg.get("immediate_ingress_enabled", True),
+        "immediate_ingress_shop_ids": cfg.get("immediate_ingress_shop_ids", []),
+        "immediate_ingress_disabled_shop_ids": cfg.get("immediate_ingress_disabled_shop_ids", []),
         "command_poll_seconds": cfg.get("command_poll_seconds"),
         "websocket_enabled": bool(cfg.get("websocket_enabled", False)),
         "websocket_url": str(cfg.get("websocket_url") or ""),
@@ -472,6 +532,15 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "upload_batch_size": 500,
         "upload_concurrency": 16,
         "upload_drain_budget_seconds": 3.0,
+        # 两个 P0 时延特性：默认全开；*_enabled=false 一键回退，
+        # *_disabled_shop_ids 单店回退，*_shop_ids 非空时退化成窄白名单灰度。
+        "immediate_ingress_enabled": True,
+        "immediate_ingress_shop_ids": [],
+        "immediate_ingress_disabled_shop_ids": [],
+        "command_sender_enabled": True,
+        "command_sender_shop_ids": [],
+        "command_sender_disabled_shop_ids": [],
+        "command_sender_workers": 6,
         "outgoing_dedup_seconds": 60.0,
         "history_pull_seconds": 0,
         "history_pull_size": 20,

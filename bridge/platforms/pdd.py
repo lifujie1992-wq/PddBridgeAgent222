@@ -46,11 +46,12 @@ class PddPlatform(PlatformBase):
         # 自有通道优先：CDP/自有 DLL。旧逻辑在"探域日志目录非空"时优先选探域旧 DLL，
         # 即使配置的是 CDP —— 脱离探域后这就是选了一个不存在的东西，
         # 于是报 `PddWorkbench DLL port unavailable`。
+        cdp = None
         if cfg.get("_pddbridge_source") is not None or self._cdp_active(cfg):
             from ..pddbridge_source import channel_status_cdp
 
             cdp = channel_status_cdp(cfg)
-            if cdp.get("send_ready") or cdp.get("receive_ready") or self._cdp_active(cfg):
+            if cdp.get("send_ready"):
                 return {**cdp, "platform": self.name, "send_channel": "cdp"}
         native = pdd_channel.channel_status(
             configured_port=cfg.get("dll_port"),
@@ -59,7 +60,7 @@ class PddPlatform(PlatformBase):
         # 探域旧 DLL 只作为存量兜底：必须真的探测到端口才算数（不看日志目录）
         if native.get("dll_ready"):
             return {**native, "platform": self.name, "send_channel": "tanyu"}
-        return {**native, "platform": self.name, "send_channel": "cdp"}
+        return {**(cdp or native), "platform": self.name, "send_channel": "cdp"}
 
     def open_chat(
         self,

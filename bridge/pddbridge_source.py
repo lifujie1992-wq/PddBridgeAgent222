@@ -573,7 +573,7 @@ class PddbridgeSource:
             self._act.append(("send", (str(uid), str(content), str(account or ""), event, timeout, csid)))
         event.wait(timeout)
         if event.result is None:
-            key = "%s|%s" % (str(uid), str(content)[:48])
+            key = (str(account), str(uid), str(content))
             with self._lock:
                 event.cancelled = True
                 self._act = [(name, args) for name, args in self._act
@@ -1631,7 +1631,7 @@ class PddbridgeSource:
     def _handle_frame_locked(self, e: dict, session: _Session | None = None) -> None:
         hint = session.account if session is not None else ""
         if e.get("dir") == "send_error":
-            key = "%s|%s" % (str(e.get("uid") or ""), str(e.get("content") or "")[:48])
+            key = (hint, str(e.get("uid") or ""), str(e.get("content") or ""))
             with self._lock:
                 pending = self._pending_sends.get(key)
                 if pending and hint and pending.get("account") != hint:
@@ -1991,7 +1991,7 @@ class PddbridgeSource:
                                     "retryable": False, "via": "expired"}
                     event.set()
                     return
-        key = "%s|%s" % (str(uid), str(content)[:48])
+        key = (str(account), str(uid), str(content))
         with self._lock:
             self._pending_sends[key] = {
                 "uid": str(uid), "content": str(content), "event": event,
@@ -2042,7 +2042,7 @@ class PddbridgeSource:
         receipt_account = self._account_for_frame(p.get("obj") or {}, account_hint)
         to_uid = _to_buyer_uid(p)
         content = str(p.get("content") or "")
-        key = "%s|%s" % (to_uid, content[:48])
+        key = (receipt_account, to_uid, content)
         with self._lock:
             pend = self._pending_sends.get(key)
             if pend and (pend.get("account") != receipt_account or pend.get("content") != content):
@@ -2180,6 +2180,12 @@ def send_text_cdp(
             **base, "ok": False, "status": "failed", "real_send": False,
             "error_user": "CDP 通道未就绪（当前 %s），请确认 PDD 商家工作台已打开"
             % st.get("state"),
+        }
+    if not st.get("send_ready"):
+        return {
+            **base, "ok": False, "status": "failed", "real_send": False,
+            "error": "send_channel_not_ready",
+            "error_user": "工作台发送通道未就绪",
         }
     try:
         return src.send_and_wait(buyer_id, content, account, timeout=5.0,

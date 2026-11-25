@@ -113,14 +113,14 @@ Write-Host "Jump:    $jump"
 
 # --- 原生通道：v5 才有接收管道；v3 仅作老发送通道兜底 ---
 $nativeCopied = @()
-foreach ($name in @("pdd_send_v6.dll", "pdd_send_v5.dll", "pdd_send_v3.dll", "injector.exe")) {
+foreach ($name in @("pdd_send_v6.dll", "injector.exe")) {
     $src = Join-Path $NativeOut $name
     if (Test-Path -LiteralPath $src) {
         Copy-Item -Force $src $agentBundle
         $nativeCopied += $name
     }
 }
-if (($nativeCopied -contains "pdd_send_v6.dll" -or $nativeCopied -contains "pdd_send_v5.dll") -and $nativeCopied -contains "injector.exe") {
+if (($nativeCopied -contains "pdd_send_v6.dll") -and $nativeCopied -contains "injector.exe") {
     Write-Host "Native:  $($nativeCopied -join ', ') (copied into agent bundle)"
 } else {
     Write-Warning "原生 DLL/注入器不全（已复制: $($nativeCopied -join ', ')），包里将没有原生通道"

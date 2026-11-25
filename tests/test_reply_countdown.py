@@ -2,6 +2,10 @@
 """回复倒计时必须在"已回复"后停止（现场：AI 回复了、界面还在走 90s 倒计时）。"""
 from __future__ import annotations
 
+from queue import Queue
+from types import SimpleNamespace
+
+from bridge.agent import BridgeAgent
 from run_frontend_service import LocalSeatState as Store
 
 
@@ -40,3 +44,21 @@ def test_buyer_message_after_reply_restarts_countdown():
     state = _state(msgs)
     assert state["waiting_for_reply"] is True
     assert state["waiting_since"] == 1020
+
+
+def test_bridge_reply_requires_real_send_to_stop_countdown():
+    agent = SimpleNamespace(
+        cfg={},
+        platform=SimpleNamespace(name="pdd"),
+        _local_ingest_queue=Queue(),
+    )
+    publish = BridgeAgent._publish_self_reply
+    publish(agent, "shop", "buyer", "reply",
+            {"ok": True, "status": "accepted", "via": "dry_run", "real_send": False})
+    assert agent._local_ingest_queue.empty()
+
+    for real_send in (False, True):
+        publish(agent, "shop", "buyer", "reply",
+                {"ok": True, "status": "accepted", "real_send": real_send})
+        event = agent._local_ingest_queue.get_nowait()
+        assert _state([_u(1000), event])["waiting_for_reply"] is (not real_send)

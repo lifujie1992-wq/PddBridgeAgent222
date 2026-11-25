@@ -328,10 +328,11 @@ def test_sender_pool_keeps_per_conversation_order(tmp_path):
 
     agent._execute_command = fake_execute
     agent._start_sender_pool()
-    for index in range(6):
-        agent._sender_queue.put_nowait({"id": "cmd-%d" % index,
-                                        "account": "cs_427302374:164945148",
-                                        "buyer_id": "same-buyer"})
+    _install_fake_pull(agent, [
+        {"id": "cmd-%d" % index, "account": "cs_427302374:164945148",
+         "buyer_id": "same-buyer"} for index in range(6)
+    ])
+    agent._handle_commands()
     deadline = time.time() + 5.0
     while len(state["done"]) < 6 and time.time() < deadline:
         time.sleep(0.01)

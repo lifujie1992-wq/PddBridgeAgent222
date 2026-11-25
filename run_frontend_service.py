@@ -33,7 +33,7 @@ BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
 DEFAULT_BACKEND = "http://47.107.138.228:18765"
 DEFAULT_PORT = 18767
-LOCAL_GATEWAY_VERSION = "0.7.23.0"
+LOCAL_GATEWAY_VERSION = "0.8.1.0"
 _SENSITIVE_PROXY_HEADERS = {
     "host",
     "content-length",
@@ -587,7 +587,6 @@ class LocalSeatState:
                 waiting_since = 0.0
                 continue
             if role == "mall_cs":
-                # 只有明确失败/不确定才继续算"未回复"（等回执或人工兜底）
                 if delivery in {"failed", "indeterminate"}:
                     continue
                 waiting_since = 0.0
