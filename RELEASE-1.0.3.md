@@ -1,4 +1,4 @@
-# 90科技多多助手 1.0.2（基于 0.7.6 稳定版）
+# 90科技多多助手 1.0.3（基于 0.7.6 稳定版）
 
 客户交付包，刻意不引入 0.8.x 的新链路，只做改名与默认值对齐。
 
@@ -63,3 +63,27 @@ PDD 的聊天 socket 断开时不会推 `send_message` 回执。现在：
 实测（模拟页面 0.4s 受理、socket=none）：**2.00s / accepted**（改前 6.95s / indeterminate）。
 
 浮窗倒计时仍然由 1.0.1 的「本地补写卖家回复」清零，与本条互不依赖。
+
+## 1.0.3 修复（相对 1.0.2）—— 1.0.2 会丢消息
+
+1.0.2 为了「socket 断开别干等」把等待砍到 2 秒，结果**排队中还没轮到执行的发送被撤销**，
+消息直接丢掉（现场 04:10:20 那条 `1795637406820` 就是这么没的：日志里没有 `send accepted`，
+3.05s 后报 indeterminate）。
+
+现在拆成三步：
+
+1. 先等它**真的开始执行**（排队不算失败，最长等到 timeout=5s，绝不撤销）；
+2. 页面受理后等回执；socket 明确断开时只再等 2 秒；
+3. 压根没执行到 → `failed / retryable / send_not_executed`（中心可重投），绝不报「已提交」。
+
+实测（1.0.3，真实会话）：
+
+```
+04:27:03 command received
+04:27:05 send accepted（页面 eval 1s 内完成）
+04:27:07 accepted，耗时 3.08s，real_send=True
+04:27:07 self reply published locally delivery=confirmed
+本地会话 waiting_for_reply = False   ← 浮窗倒计时清零
+```
+
+对比改前同样场景：`6.95s / indeterminate / real_send=False`。

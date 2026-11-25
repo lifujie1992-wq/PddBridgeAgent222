@@ -459,54 +459,70 @@ class PddbridgeSource:
         return event.result
 
     def send_and_wait(self, uid, content, account, *, timeout: float = 5.0, csid=None, is_expired=None) -> dict:
-        """同步发送并等待回执。供 agent 命令线程调用（阻塞, 守护线程执行 eval）。"""
+        """同步发送并等待回执。供 agent 命令线程调用（阻塞, 守护线程执行 eval）。
+
+        1.0.3 拆分「排队没轮到执行」和「执行了没回执」：
+          * 排队阶段最长等到 timeout（撤销会真的把消息丢掉 —— 现场 04:10 那条就是这样丢的）；
+          * 页面受理后，socket 明确断开时只再等 2 秒回执，然后按 accepted 回报；
+          * 压根没执行到 → failed + retryable，绝不报“已提交”。
+        """
         if not self._thread or not self._thread.is_alive():
             return {
                 "ok": False, "status": "failed", "real_send": False, "via": "cdp",
                 "error_user": "CDP 通道未启动，请确认 PDD 商家工作台已打开",
             }
-        # socket 断开（没点开任何买家会话）时 PDD 不会推 send_message 回执：
-        # 继续等满 5 秒只是白等，还会把已经发出去的消息报成“未确认”。
         session = self._session_for_send(account)
         socket_state = str(getattr(session, "socket_state", "unknown") or "unknown")
-        # 只有「明确探测到断开」才缩短等待；unknown（刚启动还没探过）按正常等，
-        # 否则健康探测之前的 5 秒里会把本来能拿到回执的发送误报成 accepted。
+        # 只有「明确探测到断开」才缩短回执等待；unknown（刚启动还没探过）按正常等。
         socket_down = socket_state in ("none", "no_socket", "probe_failed", "closed", "2", "3")
-        wait_s = min(timeout, 2.0) if socket_down else timeout
+        deadline = time.monotonic() + timeout
         event = _SendWaiter()
         event.is_expired = is_expired
-        event.deadline = time.monotonic() + timeout
+        event.deadline = deadline
         with self._lock:
             self._act.append(("send", (str(uid), str(content), str(account or ""), event, timeout, csid)))
-        event.wait(wait_s)
-        if event.result is None and getattr(event, "accepted", False) and wait_s < timeout:
-            # 页面已受理、只是回执等不到：别再干等，按“已受理/未确认”回报。
-            log.warning("send accepted but no echo within %.1fs (socket=%s) uid=%s",
-                        wait_s, socket_state, uid)
-            with self._lock:
-                self._pending_sends.pop("%s|%s" % (str(uid), str(content)[:48]), None)
-            return {
-                "ok": True,
-                "status": "accepted",
-                "real_send": True,
-                "delivery_uncertain": True,
-                "echo_missing": True,
-                "socket_state": socket_state,
-                "via": "cdp_accepted",
-                "buyer_id": str(uid),
-                "error_user": "工作台未连接买家会话，消息已发出但无法确认；"
-                              "建议在工作台点开该买家会话（之后即可恢复回执）",
-            }
-        if event.result is None:
+
+        def wait_until(pred, end):
+            while time.monotonic() < end:
+                if event.result is not None or pred():
+                    return True
+                time.sleep(0.02)
+            return event.result is not None or pred()
+
+        # ① 等它真的开始执行（排队中不算失败，也别撤销）
+        wait_until(lambda: bool(getattr(event, "started", False)), deadline)
+
+        if event.result is None and not getattr(event, "started", False):
             key = "%s|%s" % (str(uid), str(content)[:48])
             with self._lock:
                 event.cancelled = True
                 self._act = [(name, args) for name, args in self._act
                              if not (name == "send" and args[3] is event)]
-                if key in self._pending_sends:
-                    del self._pending_sends[key]
-            if getattr(event, "accepted", False):
-                log.warning("send accepted but no echo within %.1fs uid=%s", timeout, uid)
+                self._pending_sends.pop(key, None)
+            log.warning("send not executed within %.1fs (still queued) uid=%s account=%s",
+                        timeout, uid, account)
+            return {
+                "ok": False,
+                "status": "failed",
+                "real_send": False,
+                "retryable": True,
+                "via": "cdp_queued",
+                "error": "send_not_executed",
+                "error_user": "工作台忙，这条回复没有发出去；可以重试",
+            }
+
+        # ② 等页面受理（或页面返回失败）
+        wait_until(lambda: bool(getattr(event, "accepted", False)), deadline)
+
+        # ③ 已受理：等回执；socket 明确断开时只再等 2 秒
+        if event.result is None and getattr(event, "accepted", False):
+            grace = 2.0 if socket_down else max(0.5, deadline - time.monotonic())
+            got = wait_until(lambda: False, time.monotonic() + grace)
+            if event.result is None:
+                log.warning("send accepted but no echo within %.1fs (socket=%s) uid=%s",
+                            grace, socket_state, uid)
+                with self._lock:
+                    self._pending_sends.pop("%s|%s" % (str(uid), str(content)[:48]), None)
                 return {
                     "ok": True,
                     "status": "accepted",
@@ -516,16 +532,25 @@ class PddbridgeSource:
                     "socket_state": socket_state,
                     "via": "cdp_accepted",
                     "buyer_id": str(uid),
-                    "error_user": "页面已受理但没等到回执，请核对会话",
+                    "error_user": "页面已受理但没等到回执（工作台未连接买家会话时属于正常），请核对会话",
                 }
-            return {
-                "ok": True,
-                "status": "indeterminate",
-                "real_send": False,
-                "via": "cdp",
-                "error_user": "已提交工作台但未收到发送回执，请人工核对会话",
-            }
-        return event.result
+            return event.result
+
+        if event.result is not None:
+            return event.result
+
+        # ④ 执行了但既没受理也没结果（eval 卡住/超时）
+        with self._lock:
+            self._pending_sends.pop("%s|%s" % (str(uid), str(content)[:48]), None)
+        log.warning("send started but no result within %.1fs uid=%s", timeout, uid)
+        return {
+            "ok": False,
+            "status": "indeterminate",
+            "real_send": None,
+            "retryable": False,
+            "via": "cdp",
+            "error_user": "发送已开始但结果未知，请人工核对会话",
+        }
 
     def reconnect(self) -> None:
         with self._lock:
