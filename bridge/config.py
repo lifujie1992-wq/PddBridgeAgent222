@@ -22,7 +22,7 @@ CONFIG_VERSION = 1
 
 # v1（0.7.5.0）：全部是实测调优过的行为参数
 _MIGRATIONS_V1: dict[str, Any] = {
-    "data_source": "tanyu_logs",          # 探域日志为主 + CDP 周期补拉（实测 10/10 店铺不掉线）
+    "data_source": "cdp",                 # 自有通道：CDP 页面通道 + 自有 DLL（脱离探域）
     "poll_interval_ms": 200,
     "heartbeat_seconds": 5.0,
     "command_poll_seconds": 1.5,          # 中心长轮询 20s 会让 AI 回复排名延迟几十秒
@@ -64,9 +64,13 @@ def migrate_config(cfg_path: Path, data: dict[str, Any]) -> dict[str, Any]:
 
     changed: list[str] = []
     for key, value in _MIGRATIONS_V1.items():
-        if data.get(key) != value:
-            changed.append(key)
-            data[key] = value
+        # 只在字段缺失时补默认。老实现是“值不等于 v1 默认就覆盖”，
+        # 结果客户显式设的 data_source="cdp" 每次启动都被改回 tanyu_logs ——
+        # 谁改配置都白改，这是“脱离探域”推不动的根因。
+        if key in data:
+            continue
+        data[key] = value
+        changed.append(key)
     for key, filename in _PATH_KEYS_V1:
         current = str(data.get(key) or "")
         if current and not Path(current).parent.is_dir():
@@ -299,6 +303,9 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "recv_pipe_name": str(data.get("recv_pipe_name") or ""),
         "recv_ack_pipe_name": str(data.get("recv_ack_pipe_name") or ""),
     }
+    # 记录用户显式写过的键：有些默认值会在 load 时补齐，下游无法区分
+    # "用户设成 90" 和 "我们补的 90"（history_live_window_seconds 就踩过）。
+    out["_explicit_keys"] = sorted(k for k in data.keys() if not str(k).startswith("_"))
     if not out["agent_id"]:
         out["agent_id"] = (
             f"{plat}-"
@@ -381,8 +388,21 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "recv_ack_pipe_name": str(cfg.get("recv_ack_pipe_name") or ""),
     }
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    # 保留盘上已有、但 payload 里未覆盖的字段（尤其是 config_version）。
+    # 老实现每次保存都丢掉 config_version，下次加载又触发 v1 迁移，
+    # 把 data_source 改回 tanyu_logs —— GUI 保存一次等于把配置打回旧行为。
+    merged: dict[str, Any] = {}
+    try:
+        if cfg_path.is_file():
+            existing = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+            if isinstance(existing, dict):
+                merged.update(existing)
+    except (OSError, ValueError):
+        merged = {}
+    merged.update(payload)
+    merged["config_version"] = int(cfg.get("config_version") or CONFIG_VERSION)
     # utf-8 without BOM (PowerShell UTF8 encoding often adds BOM and breaks json.loads)
-    cfg_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    cfg_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return cfg_path
 
 

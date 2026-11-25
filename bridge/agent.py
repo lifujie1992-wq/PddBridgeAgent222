@@ -692,7 +692,24 @@ class BridgeAgent:
             log.info("已开始监听本机探域日志（%s）", self.platform.label)
 
     def _fallback_to_tanyu_logs(self) -> None:
-        """CDP 源不可用时切回探域日志（PddbridgeSource 降级回调, 线程安全）。"""
+        """CDP 源不可用时的处理（PddbridgeSource 降级回调, 线程安全）。
+
+        0.7.13 起 PDD 不再自动降级到探域日志：探域要么已卸载、要么没运行，
+        降级过去等于把唯一的数据源也关掉（现场 KD5MD2C 就是这样彻底没数据）。
+        现在保持 CDP 持续重试，并在心跳里把原因写清楚。
+        """
+        # 只有显式配置了探域日志、且目录真的存在时才允许降级（存量客户过渡期）
+        log_dir = str(self.cfg.get("tanyu_log_dir") or "")
+        try:
+            usable = bool(log_dir) and Path(log_dir).is_dir()
+        except OSError:
+            usable = False
+        if str(self._data_source or "").strip().lower() != "tanyu_logs" or not usable:
+            self._last_error = ("CDP 通道未就绪（工作台未启动/未开调试端口/未进接待页），"
+                                "保持重试，不降级到探域日志")
+            log.warning("CDP 未就绪，保持重试（data_source=%s, 日志目录可用=%s）",
+                        self._data_source, usable)
+            return
         with self._pending_lock:
             if self._effective_source == "tanyu_logs":
                 return
@@ -778,11 +795,19 @@ class BridgeAgent:
         ``history_live_window_seconds`` 可直接指定秒数，优先级最高。
         """
         policy = str(self.cfg.get("history_hold_policy") or "legacy").strip().lower()
-        default = 0.0 if policy in {"ack_capable", "off", "none", "disabled"} else 90.0
+        explicit = set(self.cfg.get("_explicit_keys") or ())
+        # load_config 总会把 history_live_window_seconds 补成 90，
+        # 老实现直接读它 → ack_capable 永远无效（现场"设了也没用"就是这个）。
+        # 只有用户真的在配置文件里写过这个键，才让它压过 policy。
+        if "history_live_window_seconds" not in explicit:
+            if policy in {"ack_capable", "off", "none", "disabled"}:
+                return 0.0
+            if policy in {"legacy", "", "default"}:
+                return max(0.0, float(self.cfg.get("history_live_window_seconds") or 90.0))
         try:
-            value = float(self.cfg.get("history_live_window_seconds", default))
+            value = float(self.cfg.get("history_live_window_seconds"))
         except (TypeError, ValueError):
-            value = default
+            value = 90.0
         return max(0.0, value)
 
     def _queue_hold(self, pending, now: float) -> dict:
@@ -1658,6 +1683,17 @@ class BridgeAgent:
             log.warning("暂时连不上中心，将自动重试：%s", exc)
 
     def run_forever(self) -> None:
+        # 现场最常见的"无法就绪"其实是代理环境变量把 127.0.0.1 也代理了：
+        # 本机探活已统一走 bridge.netlocal（强制免代理），这里只做可见性提示。
+        try:
+            from .netlocal import active_proxy_env
+
+            proxy = active_proxy_env()
+            if proxy:
+                log.warning("检测到代理环境变量 %s；本机回环（CDP/网关/直发管道）已强制绕代理",
+                            ", ".join(sorted(proxy)))
+        except Exception:
+            pass
         log.info(
             "%s %s 启动  工位=%s  服务器=%s",
             __product__,

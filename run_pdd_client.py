@@ -932,8 +932,11 @@ def _gateway_status(base_url: str, *, force_reload: bool = False) -> dict[str, A
             base_url.rstrip("/") + "/api/local-seat/v1/status" + suffix,
             headers={"Accept": "application/json"},
         )
-        with urlrequest.urlopen(req, timeout=0.8) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
+        from bridge.netlocal import get_json
+
+        # 本机网关探活不能走代理（HTTP_PROXY 会把 127.0.0.1 也转发出去，
+        # 导致"网关在监听却判不健康、循环重启"）。
+        payload = get_json(req.full_url, timeout=0.8, headers={"Accept": "application/json"})
         if isinstance(payload, dict):
             return payload
     except Exception:

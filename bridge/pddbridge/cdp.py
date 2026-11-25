@@ -77,8 +77,11 @@ def discover_ports(only_pdd=False, extra_ports=()):
 
 
 def _http_json(port, path, timeout=5):
-    with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    # 本机回环必须绕代理：urllib 默认会读 HTTP_PROXY，把 127.0.0.1 也塞给代理，
+    # 于是端口在监听却探活失败（现场：57165 报"未发现可用 CDP 端口"）。
+    from ..netlocal import get_json
+
+    return get_json("http://127.0.0.1:%d%s" % (port, path), timeout=timeout)
 
 
 def list_targets(port):
@@ -112,7 +115,10 @@ class Cdp:
     """对一个 CDP target 的连接, 提供执行上下文扫描与求值。"""
 
     def __init__(self, ws_url, timeout=8):
-        self.ws = websocket.create_connection(ws_url, timeout=timeout)
+        self.ws = websocket.create_connection(
+            ws_url, timeout=timeout,
+            http_no_proxy=["127.0.0.1", "localhost", "::1"],
+            suppress_origin=True)
         self._seq = 0
         self._contexts = {}  # id -> info
 

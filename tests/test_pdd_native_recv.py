@@ -263,18 +263,27 @@ def test_history_ready_window_is_configurable():
 
 
 def test_history_hold_policy_maps_to_window():
+    """policy 与显式窗口的优先级。
+
+    load_config 总会把 history_live_window_seconds 补成 90，所以不能直接读它判断，
+    必须看 `_explicit_keys`（用户是否真的写过这个键）——否则 ack_capable 永远无效。
+    """
     from bridge.agent import BridgeAgent
 
     class Stub:
         pass
 
     cases = [
+        # (cfg, 期望秒数)
         ({"history_hold_policy": "legacy"}, 90.0),
         ({}, 90.0),
-        ({"history_hold_policy": "ack_capable"}, 0.0),
+        ({"history_hold_policy": "ack_capable"}, 0.0),          # 补出来的 90 不算显式
         ({"history_hold_policy": "off"}, 0.0),
-        ({"history_hold_policy": "ack_capable", "history_live_window_seconds": 15}, 15.0),
-        ({"history_live_window_seconds": 0}, 0.0),
+        ({"history_hold_policy": "ack_capable", "history_live_window_seconds": 15,
+          "_explicit_keys": ["history_live_window_seconds"]}, 15.0),
+        ({"history_live_window_seconds": 0, "_explicit_keys": ["history_live_window_seconds"]}, 0.0),
+        ({"history_hold_policy": "legacy", "history_live_window_seconds": 30,
+          "_explicit_keys": ["history_live_window_seconds"]}, 30.0),
     ]
     for cfg, expected in cases:
         stub = Stub()

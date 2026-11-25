@@ -489,7 +489,9 @@ def open_chat_pdd(
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
         )
-        with urlrequest.urlopen(req, timeout=4.0) as resp:
+        # 回环请求强制绕代理（HTTP_PROXY 会把 127.0.0.1 转发出去）
+        from .netlocal import opener as _local_opener
+        with _local_opener(req, timeout=4.0) as resp:
             raw = resp.read()
             err = _dll_response_error(int(resp.status), raw)
             if err:

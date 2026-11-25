@@ -43,21 +43,23 @@ class PddPlatform(PlatformBase):
         return pdd_parser.is_seller_failure_line(line)
 
     def channel_status(self, cfg: dict) -> Dict[str, Any]:
-        native = pdd_channel.channel_status(
-            configured_port=cfg.get("dll_port"),
-            configured_pid=cfg.get("workbench_pid"),
-        )
-        # Prefer the native sender when available. A configured log directory
-        # alone does not mean that sender exists on this computer.
-        if native.get("dll_ready") and (cfg.get("tanyu_log_dir") or not self._cdp_active(cfg)):
-            return {**native, "platform": self.name, "send_channel": "tanyu"}
+        # 自有通道优先：CDP/自有 DLL。旧逻辑在"探域日志目录非空"时优先选探域旧 DLL，
+        # 即使配置的是 CDP —— 脱离探域后这就是选了一个不存在的东西，
+        # 于是报 `PddWorkbench DLL port unavailable`。
         if cfg.get("_pddbridge_source") is not None or self._cdp_active(cfg):
             from ..pddbridge_source import channel_status_cdp
 
             cdp = channel_status_cdp(cfg)
-            if cdp.get("send_ready") or self._cdp_active(cfg):
+            if cdp.get("send_ready") or cdp.get("receive_ready") or self._cdp_active(cfg):
                 return {**cdp, "platform": self.name, "send_channel": "cdp"}
-        return {**native, "platform": self.name, "send_channel": "tanyu"}
+        native = pdd_channel.channel_status(
+            configured_port=cfg.get("dll_port"),
+            configured_pid=cfg.get("workbench_pid"),
+        )
+        # 探域旧 DLL 只作为存量兜底：必须真的探测到端口才算数（不看日志目录）
+        if native.get("dll_ready"):
+            return {**native, "platform": self.name, "send_channel": "tanyu"}
+        return {**native, "platform": self.name, "send_channel": "cdp"}
 
     def open_chat(
         self,
