@@ -111,6 +111,44 @@ class DirectSender:
             "reply": reply,
         }
 
+    def send_image(self, uid: str, image_path: str, csid: str | None = None,
+                   account: str | None = None):
+        """发本地图片（DLL 内部 SendImageMsg）。不可用返回 None。"""
+        if not self.enabled:
+            return None
+        if not uid or not image_path:
+            return None
+        cmd = "IMAGE|%s|%s|%s" % (csid or "", uid, image_path)
+        started = time.monotonic()
+        try:
+            reply = self._exchange(cmd)
+        except Exception as exc:
+            self.last_error = "exception:%s" % exc
+            reply = None
+        cost_ms = int((time.monotonic() - started) * 1000)
+        if reply is None:
+            self.skip_count += 1
+            log.debug("图片直发通道不可用: %s", self.last_error)
+            return None
+        ok = reply.strip() == "OK 1"
+        if ok:
+            self.ok_count += 1
+        else:
+            self.fail_count += 1
+        return {
+            "ok": ok,
+            "status": "sent" if ok else "failed",
+            "real_send": ok,
+            "retryable": not ok,
+            "via": "dll_direct_image",
+            "cost_ms": cost_ms,
+            "buyer_id": uid,
+            "csid": csid,
+            "account": account,
+            "image_path": image_path,
+            "reply": reply,
+        }
+
     def stats(self) -> dict:
         return {"enabled": self.enabled, "ok": self.ok_count, "fail": self.fail_count,
                 "skip": self.skip_count, "last_error": self.last_error, "pipe": self.pipe}

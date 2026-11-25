@@ -119,3 +119,54 @@ def queue_metrics(events, now=None):
             "oldest_wait_seconds": round(max(0.0, now - min(captures)), 3) if captures else 0.0,
             "max_capture_delay_seconds": round(max(delays, default=0.0), 3),
             "history_pending": sum(bool(e.get("is_history")) for e in rows)}
+
+
+# ---------------- 新鲜补拉提升为实时（Phase-3） ----------------
+# 现场问题：刚发出的买家消息，如果这一轮是被「周期补拉 / 打开会话加载」的 list 帧
+# 抓到的，就会被标成 history，然后被 90 秒窗口压住 → 到中心恰好 stale，AI 不回复
+# （服务端当天 35/36 轮未回复都是这个原因）。
+# 解决办法：只有当"这条消息很新、还没人回过、来源是可追溯的主动补拉"时，
+# 才把它按实时上送；真正的历史、重放、已回复的一律照旧走窗口。
+FRESH_PULL_MAX_AGE_SECONDS = float(os.environ.get("PDD_FRESH_PULL_MAX_AGE_SECONDS") or 30.0)
+
+_REPLAY_MARKERS = ("spill", "replay", "restore", "local_queue")
+
+
+def is_replay_source(value) -> bool:
+    text = str(value or "").lower()
+    return any(marker in text for marker in _REPLAY_MARKERS)
+
+
+def promote_fresh_history(row, *, now=None, max_age=None, has_seller_reply=False):
+    """把「刚发出就被补拉抓到」的消息从 history 提升为实时。
+
+    返回新 dict（不改原对象）。不满足条件原样返回。
+    """
+    if not row.get("is_history"):
+        return row
+    # 只看 capture_source / replayed：history_reason 里的 "replay" 是 stamp_message
+    # 的兜底标签，几乎所有历史帧都带，拿它当“重放”会把该提升的全挡掉。
+    if row.get("replayed") or is_replay_source(row.get("capture_source")):
+        return row
+    reason = str(row.get("history_reason") or "")
+    if reason and reason not in {"replay", "stale_platform_time"}:
+        return row                      # missing/future 平台时间不提升
+    now = time.time() if now is None else float(now)
+    age_limit = FRESH_PULL_MAX_AGE_SECONDS if max_age is None else float(max_age)
+    ts = epoch_seconds(row.get("ts"))
+    if not ts:
+        return row
+    if age_limit > 0 and (now - ts) > age_limit:
+        return row
+    if has_seller_reply:
+        return row                      # 客服已经回过，别再当新问题触发 AI
+    out = dict(row)
+    out["is_history"] = False
+    out["auto_reply_eligible"] = True
+    out["history_reason"] = "fresh_pull_promoted"
+    out["capture_source"] = "pdd_history_pull"
+    out["source"] = "pdd_cdp"
+    # 真实发现时间（不是平台时间）：否则中心会算出一条假延迟
+    out["captured_at"] = now
+    out["captured_at_ms"] = int(round(now * 1000))
+    return out

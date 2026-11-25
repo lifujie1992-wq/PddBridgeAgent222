@@ -319,6 +319,23 @@
       return { ok: true, size: n };
     } catch (e) { return { ok: false, err: e && e.message }; }
   };
+  /* 客服身份（发送时 PDD 要的 sender label）。
+     与 __pddBridge_sendText 内部完全同一口径 —— 直发 DLL 也用这个值，
+     传 cs_mall:uid 这种账号串 pdd 会直接返回 false（现场 OK 0 的根因）。 */
+  window.__pddBridge_csid = function () {
+    try {
+      var app = document.getElementById('app');
+      var vm = app && app.__vue__;
+      var user = vm && vm.$store && vm.$store.state.userInfo;
+      var v = user && (user.nickname || user.username);
+      if (v) return String(v);
+    } catch (e) {}
+    try {
+      if (window.global_uid) return String(window.global_uid);
+    } catch (e) {}
+    return '';
+  };
+
   window.__pddBridge_info = function () {
     var csidGuess = null;
     try {
