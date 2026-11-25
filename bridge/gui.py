@@ -194,7 +194,7 @@ class ConfigDialog:
         ).pack(side="left", padx=(8, 0))
         tk.Checkbutton(
             options,
-            text="随桥接助手启动本地工作台",
+            text="随多多助手启动本地工作台",
             variable=self.vars["manage_local_workbench"],
             font=("Microsoft YaHei UI", 9),
             bg="white",
@@ -409,7 +409,7 @@ class BridgeGuiApp:
     def __init__(self, *, platform: str = "pdd") -> None:
         self.platform = get_platform(platform)
         self.root = tk.Tk()
-        self.root.title(f"{self.platform.label}桥接助手  v{__version__}")
+        self.root.title(f"90科技多多助手  v{__version__}")
         self.root.geometry("540x640")
         self.root.minsize(480, 560)
         self.root.configure(bg="#f4f6f8")
@@ -444,7 +444,7 @@ class BridgeGuiApp:
         header.pack(fill=tk.X)
         tk.Label(
             header,
-            text=f"{self.platform.label}桥接助手",
+            text="90科技多多助手",
             font=("Microsoft YaHei UI", 16, "bold"),
             fg="white",
             bg=color,
@@ -1187,7 +1187,7 @@ def main(platform: str = "pdd") -> int:
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
-                "桥接助手启动失败",
+                "多多助手启动失败",
                 f"{type(exc).__name__}: {exc}\n\n"
                 "常见原因：配置文件损坏或含 BOM。\n"
                 "可删除同目录 bridge_config*.json 后重开，或检查 JSON 格式。",

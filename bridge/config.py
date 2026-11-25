@@ -88,7 +88,27 @@ def migrate_config(cfg_path: Path, data: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         log.warning("配置升级写回失败（继续用内存值）: %s", exc)
     return data
-DEFAULT_SERVER_URL = "http://47.107.138.228:18765"
+DEFAULT_SERVER_URL = "http://47.112.219.14:18765"
+
+
+def default_log_dir() -> str:
+    r"""默认消息日志目录：90 科技便携包的插件日志。
+
+    运行时在 C:\Users\Public\PddPortableRuntime\<版本>\plugins\logs，
+    新机器不用手填；找不到再退回老的探域目录。
+    """
+    import glob as _glob
+
+    public = os.environ.get("PUBLIC") or r"C:\Users\Public"
+    pattern = os.path.join(public, "PddPortableRuntime", "*", "plugins", "logs")
+    try:
+        found = [d for d in _glob.glob(pattern) if os.path.isdir(d)]
+    except OSError:
+        found = []
+    if found:
+        found.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+        return found[0]
+    return DEFAULT_LOG_DIR
 
 
 def resolve_log_dir(path: str) -> str:
@@ -194,7 +214,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         # break, but authorization is exclusively enforced by the center.
         "allowed_shop_ids": [],
         "enforce_allowed_shop_ids": False,
-        "tanyu_log_dir": resolve_log_dir(str(data.get("tanyu_log_dir") or DEFAULT_LOG_DIR)),
+        "tanyu_log_dir": resolve_log_dir(str(data.get("tanyu_log_dir") or default_log_dir())),
         "platform_version": str(data.get("platform_version") or default_ver),
         "poll_interval_ms": int(data.get("poll_interval_ms") or 200),
         "heartbeat_seconds": float(data.get("heartbeat_seconds") or 5.0),
@@ -251,7 +271,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
             else False  # never default-on — paste can 串台
         ),
         # CDP 实时数据源 (PDD): data_source="cdp" 脱离探域日志, "tanyu_logs" 回退旧链路
-        "data_source": str(data.get("data_source") or "cdp"),
+        "data_source": str(data.get("data_source") or "tanyu_logs"),
         "cdp_auto_fallback": bool(data.get("cdp_auto_fallback", True)),
         "cdp_fallback_after_seconds": float(data.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": data.get("cdp_port"),
@@ -310,7 +330,7 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "workbench_pid": cfg.get("workbench_pid"),
         "dry_run": cfg.get("dry_run"),
         "allow_ui_fallback": bool(cfg.get("allow_ui_fallback", False)),
-        "data_source": str(cfg.get("data_source") or "cdp"),
+        "data_source": str(cfg.get("data_source") or "tanyu_logs"),
         "cdp_auto_fallback": bool(cfg.get("cdp_auto_fallback", True)),
         "cdp_fallback_after_seconds": float(cfg.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": cfg.get("cdp_port"),
@@ -342,7 +362,7 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "agent_name": f"{plat.label}-{socket.gethostname()}",
         "allowed_shop_ids": [],
         "enforce_allowed_shop_ids": False,
-        "tanyu_log_dir": DEFAULT_LOG_DIR,
+        "tanyu_log_dir": default_log_dir(),
         "platform_version": "3.5.0.40",
         "poll_interval_ms": 200,
         "heartbeat_seconds": 5,
@@ -376,7 +396,7 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "delivery_ledger_enabled": True,
         "delivery_ledger_path": "",
         "dry_run": False,
-        "data_source": "cdp",
+        "data_source": "tanyu_logs",
         "cdp_auto_fallback": True,
         "cdp_fallback_after_seconds": 60,
         "cdp_port": None,
