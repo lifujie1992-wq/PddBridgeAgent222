@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .parser import ACCOUNT_RE, _canonical_account
+from .message_timing import promote_fresh_history
 from .pddbridge import cdp as pdd_cdp
 from .pddbridge.protocol import buyer_message, buyer_uid, messages_from_list, parse_frame, seller_id
 
@@ -279,6 +280,10 @@ class PddbridgeSource:
         # 采集可观测性：注入成功但零帧是"假正常"的最大来源
         # （现场：socket=none / 探域没跑 → 全程 pending=0，而界面一切正常）
         self._frame_stamps: "deque[float]" = deque(maxlen=20000)
+        # Phase-3：卖家最后一次回复时间（按店铺+买家），用于判断"这条还没人回过"
+        self._last_seller_ts: dict = {}
+        # 已经以 history 身份发出去的消息（msg_id -> 时间），用于 push 后到时升级
+        self._history_emitted: dict = {}
         self._last_frame_at = 0.0
         self._frames_seen = 0
         # DLL 直发就绪状态（带缓存：管道是单实例串行，不能每次心跳都去抢）
@@ -574,6 +579,80 @@ class PddbridgeSource:
                 session.actions.put(item)
 
     # ---------------- 事件/状态 ----------------
+    def _note_seller_reply(self, parsed: dict, hint: str = "") -> None:
+        """记下「这个会话最后一次卖家回复的平台时间」，供补拉提升判断。"""
+        try:
+            ts = float(parsed.get("ts") or 0)
+        except (TypeError, ValueError):
+            return
+        if ts <= 0:
+            return
+        obj = parsed.get("obj") or {}
+        message = obj.get("message") or {}
+        endpoints = (message.get("to"), message.get("from"))
+        buyer = _to_buyer_uid({"obj": obj}) if obj else ""
+        if not buyer:
+            buyer = str(parsed.get("uid") or "")
+        account = str(hint or "")
+        if not account:
+            for endpoint in endpoints:
+                if isinstance(endpoint, dict) and endpoint.get("role") == "mall_cs":
+                    mall = str(endpoint.get("mall_id") or endpoint.get("uid") or "")
+                    target = str(obj.get("target_id") or "")
+                    if mall and target:
+                        account = "cs_%s:%s" % (mall, target)
+                    break
+        for key in {(account, buyer), ("", buyer)}:
+            if not key[1]:
+                continue
+            prev = self._last_seller_ts.get(key, 0.0)
+            if ts > prev:
+                self._last_seller_ts[key] = ts
+
+    def _upgrade_history_event(self, msg: dict) -> bool:
+        """同一 msg_id 先以 history 发出、后收到实时帧 → 升级为实时（Phase-3）。"""
+        mid = str(msg.get("msg_id") or "")
+        if not mid:
+            return False
+        emitted_at = self._history_emitted.pop(mid, 0.0)
+        if not emitted_at or time.time() - emitted_at > 300.0:
+            return False
+        msg = dict(msg)
+        msg["is_history"] = False
+        msg["auto_reply_eligible"] = True
+        msg["supersedes_history"] = True
+        msg["history_reason"] = "fresh_push_supersedes_history"
+        msg["source"] = "pdd_cdp"
+        msg["captured_at"] = time.time()
+        msg["captured_at_ms"] = int(round(msg["captured_at"] * 1000))
+        self.msg_count += 1
+        log.info("history event upgraded by live push msg_id=%s", mid)
+        self._emit(msg)
+        return True
+
+    def _promote_if_fresh(self, msg: dict) -> dict:
+        """补拉到的消息如果很新、且还没人回复过，就按实时上送（Phase-3）。"""
+        if not bool(self.cfg.get("promote_fresh_pull", True)):
+            return msg
+        try:
+            max_age = float(self.cfg.get("fresh_pull_max_age_seconds") or 30.0)
+        except (TypeError, ValueError):
+            max_age = 30.0
+        account = str(msg.get("account") or "")
+        buyer = str(msg.get("buyer_id") or "")
+        try:
+            ts = float(msg.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        seller_ts = max(self._last_seller_ts.get((account, buyer), 0.0),
+                        self._last_seller_ts.get(("", buyer), 0.0))
+        promoted = promote_fresh_history(
+            msg, now=time.time(), max_age=max_age, has_seller_reply=seller_ts > ts > 0)
+        if promoted is not msg:
+            log.info("fresh pull promoted msg_id=%s age=%.1fs account=%s",
+                     promoted.get("msg_id"), max(0.0, time.time() - ts), account)
+        return promoted
+
     def _emit(self, msg: dict) -> None:
         from .message_timing import stamp_message
         msg = stamp_message(msg)
@@ -1400,6 +1479,7 @@ class PddbridgeSource:
             # rather than a separate send_message response.
             if p.get("from_role") == "mall_cs":
                 self._handle_send_receipt(p, hint)
+                self._note_seller_reply(p, hint)
             if self._dedup("push", p.get("msg_id")):
                 self.drops["dedup_py"] += 1
                 return
@@ -1418,6 +1498,10 @@ class PddbridgeSource:
                 msg["captured_at_ms"] = e.get("t")
                 self._emit(msg)
             elif msg:
+                # 这一条之前以 history 身份发过（补拉先到），现在实时帧才到：
+                # 允许把待发队列里的历史副本升级成实时，否则它会被 90 秒窗口压住，
+                # 到中心正好 stale（现场 35/36 轮未回复就是这个）。
+                self._upgrade_history_event(msg)
                 self.drops["dedup_py"] += 1
         elif kind == "send_message":
             self._handle_send_receipt(p, hint)
@@ -1431,6 +1515,13 @@ class PddbridgeSource:
                 for bm in messages_from_list(p):
                     self.reported["history_frame"] += 1
                     msg = self._normalize_message(bm, history=True, account_hint=hint)
+                    if msg:
+                        # 显式打历史标记：_normalize_message 只设了 source，
+                        # 而提升判断需要 is_history（老代码靠 stamp_message 事后补，
+                        # 结果 Phase-3 的提升在 emit 之前永远看不到这个标记）。
+                        msg["is_history"] = True
+                        msg["history_reason"] = msg.get("history_reason") or "replay"
+                        msg["capture_source"] = msg.get("capture_source") or "pdd_cdp_history"
                     if msg and not self._seen_before(msg.get("msg_id")):
                         self.msg_count += 1
                         # 历史帧必须带消息自己的平台时间, 而不是重扫那一刻;
@@ -1441,6 +1532,9 @@ class PddbridgeSource:
                             ts_ms = 0
                         if ts_ms > 0:
                             msg["captured_at_ms"] = ts_ms
+                        msg = self._promote_if_fresh(msg)
+                        if msg.get("is_history"):
+                            self._history_emitted[str(msg.get("msg_id") or "")] = time.time()
                         self._emit(msg)
         elif kind in ("auth", "heartbeat", "sync_card_status", "push_read_state",
                       "conciliation_msg", "mall_system_msg"):
