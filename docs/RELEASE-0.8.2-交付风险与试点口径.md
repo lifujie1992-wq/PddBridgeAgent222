@@ -32,6 +32,14 @@
 | 安装包内容 | 仅带 `pdd_send_v6.dll`，v3/v5 已不再打包 |
 | 签名 | **无数字签名**（见 §3.1） |
 
+### 交付物校验
+
+| 文件 | SHA256 |
+|------|--------|
+| `dist/90科技拼多多桥接助手-Setup-0.8.2.0.exe` | `d7b4f73ea883964ef536b5392cd2ec70825df0170106929d56e4f6aa8decc14f` |
+
+包内原生件：`pdd_send_v6.dll`（844470 B）、`injector.exe`（99643 B，未改动）。
+
 > 复现命令：
 > ```powershell
 > powershell -NoProfile -ExecutionPolicy Bypass -File build_release_0.7.7.ps1 `
