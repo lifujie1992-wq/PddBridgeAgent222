@@ -431,3 +431,27 @@ def test_enrichment_event_is_deterministic_and_shares_msg_id(tmp_path):
     assert first["event_id"].startswith("pdd-context-")
     for event in (first, again, other):
         assert str(event.get("msg_id")) == "gray-2", "增强事件必须保持同一个 msg_id"
+
+
+def test_saturated_pool_does_not_block_the_poll_loop(tmp_path):
+    """池子满时取指令循环不能内联等发送（会连带心跳一起卡住）。"""
+    agent = make_agent(tmp_path)
+    agent._sender_queue = queue.Queue(maxsize=1)
+    agent._sender_queue.put_nowait({"id": "already-queued"})   # 把池子占满
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_execute(cmd):
+        started.set()
+        release.wait(5.0)
+
+    agent._execute_command = slow_execute
+    _install_fake_pull(agent, [{"id": "cmd-overflow", "account": "cs_1:2",
+                                "buyer_id": "b-1", "content": "hi",
+                                "type": "send_text"}])
+    t0 = time.monotonic()
+    BridgeAgent._handle_commands(agent, wait_seconds=0.0)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, "池子满时轮询线程被发送卡了 %.1fs" % elapsed
+    assert started.wait(3.0), "溢出的指令必须交给兜底线程执行"
+    release.set()

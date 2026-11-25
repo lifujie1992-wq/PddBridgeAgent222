@@ -78,3 +78,27 @@ def test_bare_agent_without_init_does_not_crash():
     agent.cfg = {}
     agent._commands_done = set()
     assert agent._claim_command("x") is True      # 不能抛
+
+
+def test_journal_failure_releases_the_claim():
+    """journal 只是暂时写不进去时，这条指令必须还能在下一轮重试。
+
+    0.8 的认领发生在 journal.start 之前，且认领集合没有过期 —— start 失败后
+    id 会永久占位，这条回复直到进程重启都不会再发出去。
+    """
+    agent = bare_agent()
+    agent._last_error = ""
+
+    class Journal:
+        last_error = "disk full"
+
+        def get(self, command_id):
+            return None
+
+        def start(self, cmd):
+            return False
+
+    agent.command_journal = Journal()
+    agent._execute_command({"id": "cmd-journal", "account": "cs_1:2",
+                            "buyer_id": "b-1", "content": "hi"})
+    assert agent._claim_command("cmd-journal") is True, "失败后必须释放认领"

@@ -1632,10 +1632,20 @@ class PddbridgeSource:
         hint = session.account if session is not None else ""
         if e.get("dir") == "send_error":
             key = (hint, str(e.get("uid") or ""), str(e.get("content") or ""))
+            content = str(e.get("content") or "")
             with self._lock:
                 pending = self._pending_sends.get(key)
                 if pending and hint and pending.get("account") != hint:
                     pending = None
+                if not pending and content:
+                    # key 带上 account 之后，命令没带 account / 只给商城号的事件
+                    # 会整条配不上。这里按内容唯一兜底，任意一侧为空即视为可用。
+                    matches = [(item_key, row) for item_key, row in self._pending_sends.items()
+                               if str(row.get("content") or "") == content
+                               and (not hint or not row.get("account")
+                                    or row.get("account") == hint)]
+                    if len(matches) == 1:
+                        key, pending = matches[0]
                 if pending:
                     self._pending_sends.pop(key, None)
             if pending:
@@ -2045,14 +2055,18 @@ class PddbridgeSource:
         key = (receipt_account, to_uid, content)
         with self._lock:
             pend = self._pending_sends.get(key)
-            if pend and (pend.get("account") != receipt_account or pend.get("content") != content):
+            if pend and str(pend.get("content") or "") != content:
                 pend = None
             if not pend:
                 # 回执帧的 to.uid 可能是席位自己的 uid → 按内容唯一匹配兜底，
                 # 否则老板收到的“已发送确认”会全部配不上而报未确认。
+                # 0.8 把 key 改成带 account 后，命令没带 account / 页面只给商城号
+                # 会整条配不上（已复现：pending 留 5s 后判 indeterminate）。
+                # 所以兜底不能要求 account 完全相等：任意一侧为空即可用。
                 matches = [(item_key, row) for item_key, row in self._pending_sends.items()
                            if str(row.get("content") or "") == content
-                           and row.get("account") == receipt_account]
+                           and (not receipt_account or not row.get("account")
+                                or row.get("account") == receipt_account)]
                 if len(matches) != 1:
                     return
                 key, pend = matches[0]

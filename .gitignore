@@ -41,3 +41,6 @@ installer/_local_build.iss
 
 # 定制包的本机构建副本（含本机绝对路径）
 installer/_local_build_90.iss
+
+# 运行态回扫目标表（含店铺/买家标识）
+history_targets_*.json

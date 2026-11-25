@@ -1078,6 +1078,8 @@ class BridgeAgent:
             self._sender_tails = {}
         if not hasattr(self, "_sender_pool_guard"):
             self._sender_pool_guard = threading.Lock()
+        if not hasattr(self, "_sender_overflow"):
+            self._sender_overflow = 0
 
     def _command_sender_shop_ids(self) -> List[str]:
         allowlist = self.cfg.get("command_sender_shop_ids")
@@ -1133,6 +1135,21 @@ class BridgeAgent:
             finally:
                 self._sender_queue.task_done()
 
+    _SENDER_CHAIN_WAIT_FLOOR = 30.0
+
+    def _sender_chain_wait_seconds(self) -> float:
+        """等“同一买家上一条”的上限。
+
+        无上限时，只要有一条发送卡死（工作台无响应/回执永远不来），这个买家
+        后面每条消息都会跟着卡死，池子 worker 也会被逐个占满。超时后继续执行：
+        顺序退化成尽力而为，但不至于把出站整体拖停。
+        """
+        try:
+            confirm = float(self.cfg.get("send_confirm_timeout_seconds") or 10.0)
+        except (TypeError, ValueError):
+            confirm = 10.0
+        return max(self._SENDER_CHAIN_WAIT_FLOOR, confirm * 3)
+
     def _run_queued_command(self, cmd: dict) -> None:
         order = cmd.pop("_local_send_order", None)
         if order is None:
@@ -1142,7 +1159,9 @@ class BridgeAgent:
         key, previous, done = order
         try:
             if previous is not None:
-                previous.wait()
+                if not previous.wait(self._sender_chain_wait_seconds()):
+                    log.warning("sender chain wait timed out; ordering best-effort "
+                                "account=%s buyer=%s", key[0], key[1])
             self._execute_command(cmd)
         finally:
             done.set()
@@ -1203,6 +1222,17 @@ class BridgeAgent:
                 self._command_claimed = set(list(claimed)[-1000:])
             return True
 
+    def _release_claim(self, command_id: str) -> None:
+        """撤销认领：journal 落盘失败时这条指令必须还能在下一轮重试。
+
+        认领集合没有过期时间，一旦占了位就再也不会被放出来 —— 直到进程重启。
+        """
+        lock = getattr(self, "_command_claim_lock", None)
+        if lock is None:
+            return
+        with lock:
+            getattr(self, "_command_claimed", set()).discard(command_id)
+
     def _handle_commands(self, *, wait_seconds: float = 0.0) -> None:
         self._retry_command_results()
         drain_ws_commands = getattr(self.client, "drain_ws_commands", None)
@@ -1229,18 +1259,49 @@ class BridgeAgent:
                     previous = self._sender_tails.get(key)
                     self._sender_tails[key] = done
                 cmd = dict(cmd, _local_send_order=(key, previous, done))
-                try:
-                    self._sender_queue.put_nowait(cmd)
+                if self._enqueue_command(cmd):
                     continue
-                except queue.Full:
-                    log.warning("command sender pool saturated; executing inline: %s",
-                                str((cmd or {}).get("id")
-                                    or (cmd or {}).get("command_id") or ""))
-                    self._run_queued_command(cmd)
-                    continue
+                # 池子满：绝不能在主轮询线程里内联执行 —— 那条路径要等前一条
+                # 发送完成（可能 10s+），会把取指令和心跳一起卡住。
+                log.warning("command sender pool saturated; handing off: %s",
+                            str((cmd or {}).get("id")
+                                or (cmd or {}).get("command_id") or ""))
+                self._handoff_command(cmd)
+                continue
             inline.append(cmd)
         for cmd in inline:
             self._execute_command(cmd)
+
+    def _enqueue_command(self, cmd: dict) -> bool:
+        try:
+            self._sender_queue.put_nowait(cmd)
+            return True
+        except queue.Full:
+            return False
+
+    def _handoff_command(self, cmd: dict) -> None:
+        """池子满时的兜底：交给短命线程，保持链式顺序且不阻塞轮询线程。"""
+        self._ensure_sender_state()
+        with self._sender_pool_guard:
+            if self._sender_overflow >= 16:
+                log.error("command sender overflow exhausted; dropping command %s",
+                          str((cmd or {}).get("id") or (cmd or {}).get("command_id") or ""))
+                return
+            self._sender_overflow += 1
+        thread = threading.Thread(
+            target=self._sender_overflow_task, args=(cmd,),
+            name="bridge-command-sender-overflow", daemon=True,
+        )
+        thread.start()
+
+    def _sender_overflow_task(self, cmd: dict) -> None:
+        try:
+            self._run_queued_command(cmd)
+        except Exception:
+            log.exception("command sender overflow worker failed")
+        finally:
+            with self._sender_pool_guard:
+                self._sender_overflow = max(0, self._sender_overflow - 1)
 
     def _execute_command(self, cmd: dict) -> None:
         command_id = str(cmd.get("id") or cmd.get("command_id") or "").strip()
@@ -1271,6 +1332,9 @@ class BridgeAgent:
         if not self.command_journal.start(cmd):
             self._last_error = self.command_journal.last_error
             log.error("command journal unavailable; refusing execution: %s", command_id)
+            # 认领必须放回去，否则这条指令在本进程里永远拿不回来（journal
+            # 只是暂时不可写时会丢一条回复，且只能靠重启恢复）。
+            self._release_claim(command_id)
             return
         if cmd_type not in {"send_text", "send_image", "open_chat", "pull_history", "session_state"}:
             result = {"ok": False, "status": "blocked", "real_send": False,
@@ -1424,8 +1488,14 @@ class BridgeAgent:
         发送成功只回报中心，本地会话里永远只有买家的话 → 浮窗倒计时一直不停。
         所以发送后主动补一条 role=mall_cs 的本地事件（只推本地，不上传中心）。
         """
+        if not self.cfg.get("dual_write_local_workbench", True):
+            return
+        # 正式运行路径（run_pdd_client.install_local_first）里 _local_ingest_queue
+        # 恒为 None：那时本地投递走 LocalDeliveryQueue（_local_delivery）。只认
+        # 前者会让这条修复变成死代码（0.8.1 实测整场 0 条 published 日志）。
+        delivery = getattr(self, "_local_delivery", None)
         q = getattr(self, "_local_ingest_queue", None)
-        if q is None or not self.cfg.get("dual_write_local_workbench", True):
+        if delivery is None and q is None:
             return
         result = result if isinstance(result, dict) else {}
         status = str(result.get("status") or "").strip().lower()
@@ -1441,7 +1511,7 @@ class BridgeAgent:
         if not text:
             text = "[图片]"
         delivered = ok and result.get("real_send") is True and status in {"confirmed", "sent", "accepted"}
-        delivery = "confirmed" if delivered else "indeterminate"
+        delivery_status = "confirmed" if delivered else "indeterminate"
         event = {
             "event_id": f"selfsend-{buyer_id}-{int(now * 1000)}",
             "platform": self.platform.name,
@@ -1451,14 +1521,18 @@ class BridgeAgent:
             "content": text,
             "ts": now,
             "msg_id": str(result.get("msg_id") or ""),
-            "delivery_status": delivery,
+            "delivery_status": delivery_status,
             "source": "bridge_self_send",
             "is_history": False,
             "captured_at_ms": int(now * 1000),
         }
         try:
-            q.put_nowait(event)
-            log.info("self reply published locally buyer=%s delivery=%s", buyer_id, delivery)
+            if delivery is not None:
+                delivery.enqueue(event)
+            else:
+                q.put_nowait(event)
+            log.info("self reply published locally buyer=%s delivery=%s",
+                     buyer_id, delivery_status)
         except Exception as exc:
             log.debug("self reply publish skipped: %s", exc)
 

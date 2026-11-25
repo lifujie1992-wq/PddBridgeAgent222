@@ -62,3 +62,47 @@ def test_bridge_reply_requires_real_send_to_stop_countdown():
                 {"ok": True, "status": "accepted", "real_send": real_send})
         event = agent._local_ingest_queue.get_nowait()
         assert _state([_u(1000), event])["waiting_for_reply"] is (not real_send)
+
+
+def test_local_first_path_publishes_via_local_delivery():
+    """正式运行路径（install_local_first）里没有 _local_ingest_queue。
+
+    0.8.1 现场：整场日志 0 条 "self reply published locally"，倒计时照旧不停 ——
+    因为修好的代码只看 _local_ingest_queue，而它在这个模式下恒为 None。
+    """
+    published = []
+
+    class Delivery:
+        def enqueue(self, event, **kwargs):
+            published.append(event)
+
+    agent = SimpleNamespace(
+        cfg={},
+        platform=SimpleNamespace(name="pdd"),
+        _local_ingest_queue=None,
+        _local_delivery=Delivery(),
+    )
+    BridgeAgent._publish_self_reply(
+        agent, "cs_1:2", "buyer", "已回复",
+        {"ok": True, "status": "confirmed", "real_send": True})
+    assert len(published) == 1, "local_first 模式下必须走 _local_delivery"
+    assert published[0]["role"] == "mall_cs"
+    assert published[0]["delivery_status"] == "confirmed"
+    assert _state([_u(1000), published[0]])["waiting_for_reply"] is False
+
+
+def test_local_first_path_skips_unconfirmed_send():
+    """没确认发出（indeterminate）不能写成本地已回复，否则倒计时会误停。"""
+    published = []
+
+    class Delivery:
+        def enqueue(self, event, **kwargs):
+            published.append(event)
+
+    agent = SimpleNamespace(
+        cfg={}, platform=SimpleNamespace(name="pdd"),
+        _local_ingest_queue=None, _local_delivery=Delivery())
+    BridgeAgent._publish_self_reply(
+        agent, "cs_1:2", "buyer", "已回复",
+        {"ok": False, "status": "failed", "real_send": False})
+    assert published == [], "明确失败的不写本地会话"
