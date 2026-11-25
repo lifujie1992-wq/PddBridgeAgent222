@@ -1,4 +1,4 @@
-# 90科技多多助手 1.0.1（基于 0.7.6 稳定版）
+# 90科技多多助手 1.0.2（基于 0.7.6 稳定版）
 
 客户交付包，刻意不引入 0.8.x 的新链路，只做改名与默认值对齐。
 
@@ -48,3 +48,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build_1.0.0.ps1 `
 
 另：浮窗（PddAdsorbWindow）改为先于网关启动 —— 升级后旧网关健康探测常要等几十秒，
 浮窗跟着等会让人以为没装上。
+
+## 1.0.2 修复（相对 1.0.1）
+
+**工作台没点开买家会话时，发送要干等 5 秒且被报成「未确认」。**
+PDD 的聊天 socket 断开时不会推 `send_message` 回执。现在：
+
+- 明确探测到 socket 断开（`none/no_socket/probe_failed`）→ 只等 2 秒；
+- 页面已受理（`__pddBridge_sendText` 返回 ok）→ 直接回报
+  `status=accepted / real_send=true / echo_missing=true`，并在 `error_user` 里提示
+  「工作台未连接买家会话，建议点开该买家会话」；
+- 不再把「已经发出去的消息」回报成 `real_send=false`，中心不会误判为未发送。
+
+实测（模拟页面 0.4s 受理、socket=none）：**2.00s / accepted**（改前 6.95s / indeterminate）。
+
+浮窗倒计时仍然由 1.0.1 的「本地补写卖家回复」清零，与本条互不依赖。
