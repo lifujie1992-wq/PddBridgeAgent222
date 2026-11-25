@@ -86,7 +86,7 @@ class ConfigDialog:
                 value=bool(cfg.get("dual_write_local_workbench", True))
             ),
             "dry_run": tk.BooleanVar(value=bool(cfg.get("dry_run", False))),
-            "data_source": tk.StringVar(value=str(cfg.get("data_source") or "cdp")),
+            "data_source": tk.StringVar(value=str(cfg.get("data_source") or "tanyu_logs")),
             "show_token": tk.BooleanVar(value=False),
         }
         self._build(cfg)
@@ -130,7 +130,7 @@ class ConfigDialog:
         self._entry_row(form, 0, "中心服务地址", "server_url")
         self._entry_row(form, 1, "机器令牌", "agent_token", secret=True)
         self._entry_row(form, 2, "工位名称", "agent_name")
-        self._entry_row(form, 3, "探域日志目录", "tanyu_log_dir", browse=True)
+        self._entry_row(form, 3, "消息日志目录", "tanyu_log_dir", browse=True)
         self._entry_row(form, 4, "本地工作台地址", "local_workbench_url")
         self._entry_row(form, 5, "WebSocket 地址", "websocket_url")
 
@@ -158,7 +158,7 @@ class ConfigDialog:
         options.grid(row=7, column=0, columnspan=3, sticky="ew", padx=16, pady=(10, 8))
         tk.Checkbutton(
             options,
-            text="启用 WebSocket 长连接（服务端支持后再开启）",
+            text="启用 WebSocket 长连接（推荐开启）",
             variable=self.vars["websocket_enabled"],
             font=("Microsoft YaHei UI", 9, "bold"),
             bg="white",
@@ -176,10 +176,18 @@ class ConfigDialog:
             font=("Microsoft YaHei UI", 9),
             bg="white",
         ).pack(side="left")
+        # 3.5.0.40 上 CDP 页面通道没有 JS socket，收不到任何消息，已从新配置里隐藏；
+        # 老配置如果还写着 cdp，原样显示出来（标“已停用”），保存时不改它，避免静默篡改客户设置。
+        current_source = str(self.vars["data_source"].get() or "").strip()
+        ds_values = ["tanyu_logs"]
+        if current_source and current_source != "tanyu_logs":
+            ds_values.append(current_source + "（已停用）" if current_source == "cdp" else current_source)
+            if current_source == "cdp":
+                self.vars["data_source"].set("cdp（已停用）")
         ds_combo = ttk.Combobox(
             ds_row,
             textvariable=self.vars["data_source"],
-            values=("cdp", "tanyu_logs"),
+            values=tuple(ds_values),
             state="readonly",
             font=("Microsoft YaHei UI", 9),
             width=20,
@@ -187,7 +195,7 @@ class ConfigDialog:
         ds_combo.pack(side="left")
         tk.Label(
             ds_row,
-            text="  cdp=PDD 实时收发（脱离探域）；tanyu_logs=探域日志（降级）",
+            text="  tanyu_logs = 插件日志（当前版本唯一可用）",
             font=("Microsoft YaHei UI", 9),
             fg="#57606a",
             bg="white",
@@ -361,7 +369,10 @@ class ConfigDialog:
                     "manage_local_workbench": self.vars["manage_local_workbench"].get(),
                     "dual_write_local_workbench": self.vars["dual_write_local_workbench"].get(),
                     "dry_run": self.vars["dry_run"].get(),
-                    "data_source": str(self.vars["data_source"].get() or "cdp"),
+                    # 下拉框里的“cdp（已停用）”只是展示标记，存盘时还原成真值
+                    "data_source": str(
+                        self.vars["data_source"].get() or "tanyu_logs"
+                    ).replace("（已停用）", "").strip() or "tanyu_logs",
                 }
             )
             save_config(updated, self.app.cfg_path)

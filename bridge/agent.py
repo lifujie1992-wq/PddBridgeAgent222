@@ -155,7 +155,7 @@ class BridgeAgent:
                 daemon=True,
             ).start()
         # CDP 实时数据源（PDD）：默认 data_source=cdp, 脱离探域日志; 可切回 tanyu_logs 降级
-        self._data_source = str(self.cfg.get("data_source") or "cdp")
+        self._data_source = str(self.cfg.get("data_source") or "tanyu_logs")
         self._effective_source = self._data_source
         self.pddbridge_source = None
         if self.platform.name == "pdd":

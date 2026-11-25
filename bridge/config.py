@@ -22,7 +22,7 @@ CONFIG_VERSION = 1
 
 # v1（0.7.5.0）：全部是实测调优过的行为参数
 _MIGRATIONS_V1: dict[str, Any] = {
-    "data_source": "cdp",                 # 自有通道：CDP 页面通道 + 自有 DLL（脱离探域）
+    "data_source": "tanyu_logs",         # 3.5.0.40 上 CDP 页面通道收不到消息，插件日志是唯一可用的
     "poll_interval_ms": 200,
     "heartbeat_seconds": 5.0,
     "command_poll_seconds": 1.5,          # 中心长轮询 20s 会让 AI 回复排名延迟几十秒
@@ -95,6 +95,27 @@ def migrate_config(cfg_path: Path, data: dict[str, Any]) -> dict[str, Any]:
         log.warning("配置升级写回失败（继续用内存值）: %s", exc)
     return data
 DEFAULT_SERVER_URL = "http://47.112.219.14:18765"
+
+
+def default_log_dir() -> str:
+    """默认的消息日志目录。
+
+    90 科技便携包把客户端运行时放在 Public\PddPortableRuntime\<版本>\ 下，
+    探域插件把 buyer_msg 写在它下面的 plugins\logs 里。存在就直接用，
+    这样新装的机器不用手填；没有就退回老的探域安装目录。
+    """
+    import glob as _glob
+
+    public = os.environ.get("PUBLIC") or r"C:\Users\Public"
+    pattern = os.path.join(public, "PddPortableRuntime", "*", "plugins", "logs")
+    try:
+        found = [d for d in _glob.glob(pattern) if os.path.isdir(d)]
+    except OSError:
+        found = []
+    if found:
+        found.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+        return found[0]
+    return DEFAULT_LOG_DIR
 
 
 def resolve_log_dir(path: str) -> str:
@@ -200,7 +221,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         # break, but authorization is exclusively enforced by the center.
         "allowed_shop_ids": [],
         "enforce_allowed_shop_ids": False,
-        "tanyu_log_dir": resolve_log_dir(str(data.get("tanyu_log_dir") or DEFAULT_LOG_DIR)),
+        "tanyu_log_dir": resolve_log_dir(str(data.get("tanyu_log_dir") or default_log_dir())),
         "platform_version": str(data.get("platform_version") or default_ver),
         "poll_interval_ms": int(data.get("poll_interval_ms") or 200),
         "heartbeat_seconds": float(data.get("heartbeat_seconds") or 5.0),
@@ -274,7 +295,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
             else False  # never default-on — paste can 串台
         ),
         # CDP 实时数据源 (PDD): data_source="cdp" 脱离探域日志, "tanyu_logs" 回退旧链路
-        "data_source": str(data.get("data_source") or "cdp"),
+        "data_source": str(data.get("data_source") or "tanyu_logs"),
         "cdp_auto_fallback": bool(data.get("cdp_auto_fallback", True)),
         "cdp_fallback_after_seconds": float(data.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": data.get("cdp_port"),
@@ -388,7 +409,7 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "workbench_pid": cfg.get("workbench_pid"),
         "dry_run": cfg.get("dry_run"),
         "allow_ui_fallback": bool(cfg.get("allow_ui_fallback", False)),
-        "data_source": str(cfg.get("data_source") or "cdp"),
+        "data_source": str(cfg.get("data_source") or "tanyu_logs"),
         "cdp_auto_fallback": bool(cfg.get("cdp_auto_fallback", True)),
         "cdp_fallback_after_seconds": float(cfg.get("cdp_fallback_after_seconds") or 60),
         "cdp_port": cfg.get("cdp_port"),

@@ -31,12 +31,12 @@ def test_migration_keeps_explicit_data_source():
         assert on_disk["config_version"] == CONFIG_VERSION
 
 
-def test_migration_fills_missing_keys_with_cdp():
-    """缺失时才补默认，且 PDD 默认是 cdp（不再默认回探域日志）。"""
+def test_migration_fills_missing_keys_with_tanyu_logs():
+    """缺失时才补默认；3.5.0.40 上 CDP 页面通道收不到消息，默认走插件日志。"""
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(Path(tmp), {"platform": "pdd"})
         cfg = load_config(path)
-        assert cfg["data_source"] == "cdp"
+        assert cfg["data_source"] == "tanyu_logs"
 
 
 def test_save_config_preserves_config_version_and_unknown_fields():
