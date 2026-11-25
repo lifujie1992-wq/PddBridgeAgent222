@@ -120,7 +120,8 @@ class _Session:
     __slots__ = ("port", "target_id", "target_url", "cdp", "cid", "account", "mall_id",
                  "last_health", "push_ok", "frames", "socket_state", "send_capable",
                  "lock", "actions", "worker", "failures", "next_attempt", "next_health",
-                 "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at", "last_batch")
+                 "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at", "last_batch",
+                 "evals", "eval_ms_total", "eval_ms_max")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -143,6 +144,9 @@ class _Session:
         self.next_health = 0.0
         self.last_frame_at = 0.0
         self.last_batch = 0        # 上一轮取到几帧（worker 用它决定活跃/空闲节奏）
+        self.evals = 0             # 本店累计 eval 次数
+        self.eval_ms_total = 0.0   # 本店累计 eval 耗时（秒）
+        self.eval_ms_max = 0.0     # 本店单次最慢 eval（秒）
         self.degraded_at = 0.0
         self.sender_csid = ""
         self.sender_csid_at = 0.0
@@ -346,6 +350,8 @@ class PddbridgeSource:
             "frame_error": 0,         # 帧处理异常
         }
         self._js_stats: dict = {}
+        self._eval_count = 0        # 累计 CDP eval 次数（诊断 20 店负载用）
+        self._eval_slow = 0         # 耗时超过超时预算一半的次数
         self._warn_at: dict = {}
         # 全部上报: 除「按平台 msg_id 去重」以外不再丢弃任何帧, 回不回由中心(大脑)决定。
         self.report_all = bool(self.cfg.get("report_all", True))
@@ -712,7 +718,7 @@ class PddbridgeSource:
     # ---------------- CDP 调用（每会话一把锁，锁内才有超时） ----------------
     def _eval_timeout(self) -> float:
         try:
-            value = float(self.cfg.get("cdp_eval_timeout_seconds") or 3.0)
+            value = float(self.cfg.get("cdp_eval_timeout_seconds") or 6.0)
         except (TypeError, ValueError):
             value = 3.0
         return max(0.5, min(value, 8.0))
@@ -761,8 +767,41 @@ class PddbridgeSource:
         旧实现一律 8 秒且不串行：20 店时一次慢调用就卡住整片，期间其他店铺的帧
         全部堵在 CDP 连接上，健康探测也和取帧抢同一条 websocket。
         """
-        with session.lock:
-            return session.cdp.eval(expr, session.cid, timeout=timeout or self._eval_timeout())
+        limit = timeout or self._eval_timeout()
+        started = time.perf_counter()
+        try:
+            with session.lock:
+                return session.cdp.eval(expr, session.cid, timeout=limit)
+        finally:
+            elapsed = time.perf_counter() - started
+            self._eval_count += 1
+            session.evals += 1
+            session.eval_ms_total += elapsed
+            if elapsed > session.eval_ms_max:
+                session.eval_ms_max = elapsed
+            # 超过一半超时预算就算"慢"：20 店时这些慢调用会连锁拖死整片
+            if elapsed > limit * 0.5:
+                self._eval_slow += 1
+
+    def eval_stats(self) -> dict:
+        """CDP eval 负载快照（20 店排障用：次数、慢调用、单店最慢、轮询节奏）。"""
+        with self._lock:
+            sessions = list(self.sessions)
+        slowest = 0.0
+        per = []
+        for session in sessions:
+            if session.eval_ms_max > slowest:
+                slowest = session.eval_ms_max
+            per.append({"session": session.label(), "evals": session.evals,
+                        "max_ms": int(session.eval_ms_max * 1000)})
+        per.sort(key=lambda x: x["max_ms"], reverse=True)
+        try:
+            idle_poll = float(self.cfg.get("cdp_poll_interval_idle") or 2.0)
+        except (TypeError, ValueError):
+            idle_poll = 2.0
+        return {"evals": self._eval_count, "slow": self._eval_slow,
+                "max_ms": int(slowest * 1000), "sessions": len(sessions),
+                "idle_poll": idle_poll, "per_session": per[:5]}
 
     def _drain(self, session: _Session):
         """取一帧批次, 同时判定该页面注入是否还活着。
@@ -869,7 +908,7 @@ class PddbridgeSource:
 
     def _health_interval(self) -> float:
         try:
-            return max(2.0, float(self.cfg.get("cdp_health_interval_seconds") or 30.0))
+            return max(2.0, float(self.cfg.get("cdp_health_interval_seconds") or 90.0))
         except (TypeError, ValueError):
             return 30.0
 

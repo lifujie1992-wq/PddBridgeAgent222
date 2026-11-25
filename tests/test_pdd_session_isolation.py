@@ -40,7 +40,7 @@ def make_session(cdp=None, account="cs_1:100", port=57165, cid=1):
 
 
 def test_eval_uses_configured_timeout_and_serializes():
-    """eval 超时必须可配（默认 3s）；锁保证同一连接不被两条线程同时用。"""
+    """eval 超时必须可配（默认 6s：20 店并发下 3s 会把'慢'变成'失败'）；锁保证同一连接不被两条线程同时用。"""
     order = []
     src = PddbridgeSource({}, on_event=lambda m: None)
     cdp = FakeCdp()
@@ -64,8 +64,8 @@ def test_eval_uses_configured_timeout_and_serializes():
     session.lock.release()
 
     src._eval(make_session(cdp), "y")
-    assert cdp.timeout_seen == [3.0]
-    assert src._eval_timeout() == 3.0
+    assert cdp.timeout_seen == [6.0]
+    assert src._eval_timeout() == 6.0
 
 
 def test_actions_are_dispatched_to_the_matching_shop_only():

@@ -1760,9 +1760,24 @@ class BridgeAgent:
             metrics = queue_metrics(self._pending)
             hold = self._queue_hold(self._pending, time.time())
         status["event_queue"] = {**metrics, **hold}
-        log.info("event queue pending=%d oldest_wait=%.3fs capture_delay_max=%.3fs history=%d",
-                 metrics["pending"], metrics["oldest_wait_seconds"],
-                 metrics["max_capture_delay_seconds"], metrics["history_pending"])
+        cdp = {}
+        try:
+            src = getattr(self, "pddbridge_source", None)
+            if src is not None and hasattr(src, "eval_stats"):
+                cdp = src.eval_stats() or {}
+        except Exception:
+            cdp = {}
+        if cdp:
+            log.info("event queue pending=%d oldest_wait=%.3fs capture_delay_max=%.3fs history=%d"
+                     " | cdp evals=%d slow=%d max=%dms sessions=%d idle_poll=%.1fs",
+                     metrics["pending"], metrics["oldest_wait_seconds"],
+                     metrics["max_capture_delay_seconds"], metrics["history_pending"],
+                     cdp.get("evals", 0), cdp.get("slow", 0), cdp.get("max_ms", 0),
+                     cdp.get("sessions", 0), cdp.get("idle_poll", 0.0))
+        else:
+            log.info("event queue pending=%d oldest_wait=%.3fs capture_delay_max=%.3fs history=%d",
+                     metrics["pending"], metrics["oldest_wait_seconds"],
+                     metrics["max_capture_delay_seconds"], metrics["history_pending"])
         # 卡住时必须给原因：是等历史门槛、在途、重试，还是等本地优先队列
         if hold["held"] and hold["oldest_wait_seconds"] >= 30.0:
             log.warning("event queue hold %d 条未上送 reason=%s 最老等 %.1fs"
