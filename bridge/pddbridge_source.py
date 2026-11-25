@@ -312,6 +312,9 @@ class PddbridgeSource:
         # 可选直发通道（默认关）：注入 DLL 就绪时直调工作台内部发送接口，
         # 拿同步返回值；未就绪则返回 None 自动回退原 CDP 路径。
         self.direct_send = None
+        # DLL 直发返回 OK 0 后回退页面发送的次数（排查用，进 status）
+        self.direct_fallback_count = 0
+        self.last_direct_fallback: dict | None = None
         self._inject_watcher = None
         self._native_recv = None
         if bool(self.cfg.get("send_via_dll", False)):
@@ -455,6 +458,10 @@ class PddbridgeSource:
             "page_send_ready": (self.state == LISTENING
                                 and any(s.send_capable for s in self.sessions)),
             "dll_send_ready": self._direct_ready,
+            "dll_send": (dict(self.direct_send.stats(),
+                              fallback_to_page=self.direct_fallback_count,
+                              last_fallback=self.last_direct_fallback)
+                         if self.direct_send is not None else None),
             "msg_count": self.msg_count,
             "send_count": self.send_count,
             # 采集是否真的在跑（injected 只代表注入成功，不代表有数据）
@@ -703,6 +710,21 @@ class PddbridgeSource:
         except (TypeError, ValueError):
             value = 3.0
         return max(0.5, min(value, 8.0))
+
+    _PAGE_SENDER_CSID_EXPR = (
+        "(function(){try{var a=document.getElementById('app');var vm=a&&a.__vue__;"
+        "var u=vm&&vm.$store&&vm.$store.state.userInfo;"
+        "return (u&&(u.nickname||u.username))||null;}catch(e){return null;}})()"
+    )
+
+    def _page_sender_csid(self, session: _Session) -> str:
+        """页面当前客服身份，与 __pddBridge_sendText 缺省 csid 同一口径；取不到返回空串。"""
+        try:
+            value = self._eval(session, self._PAGE_SENDER_CSID_EXPR)
+        except Exception as exc:
+            log.debug("读取页面客服身份失败: %s", exc)
+            return ""
+        return str(value).strip() if isinstance(value, (str, int)) and str(value).strip() else ""
 
     def _eval(self, session: _Session, expr, timeout: float | None = None):
         """会话内串行 eval。--timeout 缺省用 cdp_eval_timeout_seconds（默认 3s）。
@@ -1799,13 +1821,31 @@ class PddbridgeSource:
                             "retryable": False, "via": "expired"}
             event.set()
             return
-        # 直发快路：注入 DLL 能接就拿同步结果，接不上返回 None 继续走 CDP
+        # 直发快路：注入 DLL 能接就拿同步结果，接不上返回 None 继续走 CDP。
+        # DLL 的 SendTextMsg 需要客服身份 csid；中心命令通常不带，按页面发送同一口径
+        # （userInfo.nickname/username）补上。DLL 同步返回 "OK 0" 表示没发出去
+        # （90科技 2026-11-25 实测 17 次 OK 0 均无出站回显），此时回退页面发送，
+        # 不能直接判失败——否则页面通道可用也一条发不出去。
         if self.direct_send is not None:
-            direct = self.direct_send.send(uid, content, csid, account)
+            direct_csid = csid or self._page_sender_csid(session)
+            direct = self.direct_send.send(uid, content, direct_csid, account)
             if direct is not None:
-                event.result = direct
-                event.set()
-                return
+                if direct.get("ok") or str(direct.get("reply") or "").strip() != "OK 0":
+                    event.result = direct
+                    event.set()
+                    return
+                self.direct_fallback_count += 1
+                self.last_direct_fallback = {
+                    "at": time.time(), "uid": str(uid), "csid": direct_csid or "",
+                    "reply": direct.get("reply"),
+                }
+                log.warning("DLL 直发返回 OK 0（uid=%s csid=%s），回退页面发送",
+                            uid, direct_csid or "")
+                if event.expired():
+                    event.result = {"ok": False, "status": "expired", "real_send": False,
+                                    "retryable": False, "via": "expired"}
+                    event.set()
+                    return
         key = "%s|%s" % (str(uid), str(content)[:48])
         with self._lock:
             self._pending_sends[key] = {
