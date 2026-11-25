@@ -1289,10 +1289,16 @@ def main(argv: list[str] | None = None) -> int:
     gateway_retry_thread: threading.Thread | None = None
     if manage_gateway:
         if _gateway_config_ready():
+            # 先起浮窗：网关健康探测在升级安装后常常要等几十秒（旧网关刚被杀），
+            # 浮窗跟着一起等，客户会以为没装上。浮窗自己会重连网关。
             try:
-                start_local_gateway()
                 start_adsorb_window()
             except Exception as exc:
+                log.error("adsorb window startup failed: %s", exc)
+            try:
+                start_local_gateway()
+            except Exception as exc:
+                # 旧网关刚被杀时健康探测经常失败一次；重试线程会补。
                 log.error("local gateway startup failed: %s", exc)
         if _GATEWAY_PID is None:
             gateway_retry_thread = threading.Thread(

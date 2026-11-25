@@ -127,7 +127,9 @@ end;
 
 function TargetNameList(): TArrayOfString;
 begin
-  SetArrayLength(Result, 8);
+  SetArrayLength(Result, 10);
+  Result[8] := 'PddAdsorbWindow-win.exe';
+  Result[9] := 'PddAdsorbWindow_x64.exe';
   Result[0] := 'PddBridgeAgent.exe';
   Result[1] := 'LocalSeatGateway.exe';
   Result[2] := 'PddAdsorbWindow.exe';
@@ -263,12 +265,71 @@ begin
 end;
 
 
+
+{ 安装前清理旧版的自启动项：Startup 快捷方式 + HKCU Run。
+  不删的话客户下次开机又会从旧目录拉起老版本，两个工位同时在线会重复回复。 }
+function CleanOldAutostart(): Boolean;
+var
+  Cmd: String;
+  ResultCode: Integer;
+begin
+  Cmd := '$targets = ' + Sq('PddBridgeAgent.exe|LocalSeatGateway.exe|PddAdsorbWindow.exe|PddJumpHelper.exe') + ';' +
+         '$sh = New-Object -ComObject WScript.Shell;' +
+         '$startup = Join-Path $env:APPDATA ' + Sq('Microsoft\Windows\Start Menu\Programs\Startup') + ';' +
+         'Get-ChildItem $startup -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {' +
+         '  try { $t = $sh.CreateShortcut($_.FullName).TargetPath } catch { $t = ' + Sq('') + ' };' +
+         '  if ($t -match $targets) { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue } };' +
+         '$run = ' + Sq('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run') + ';' +
+         'Get-ItemProperty $run -ErrorAction SilentlyContinue | ForEach-Object {' +
+         '  $_.PSObject.Properties | Where-Object { $_.Name -notlike ' + Sq('PS*') + ' } | ForEach-Object {' +
+         '    if ($_.Value -match $targets) {' +
+         '      Remove-ItemProperty -Path $run -Name $_.Name -Force -ErrorAction SilentlyContinue } } };' +
+         'exit 0';
+  Exec(PsExe(), '-NoProfile -ExecutionPolicy Bypass -Command "' + Cmd + '"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := ResultCode = 0;
+end;
+
+{ 首次安装时把旧版工位令牌/配置搬过来，客户不用重新填。
+   只挑 token 有效、最近修改的那份，并把 DLL 直发强行关掉（1.0.0 不注入）。 }
+function ImportExistingConfig(): Boolean;
+var
+  Cmd: String;
+  ResultCode: Integer;
+begin
+  Cmd := '$dst = ' + Sq(ExpandConstant('{app}\bridge_config.json')) + ';' +
+         'if (Test-Path $dst) { exit 0 };' +
+         '$cands = @();' +
+         '$prog = Join-Path $env:LOCALAPPDATA ' + Sq('Programs') + ';' +
+         'Get-ChildItem $prog -Directory -ErrorAction SilentlyContinue |' +
+         '  Where-Object { $_.Name -like ' + Sq('PddBridgeAgent*') + ' -or $_.Name -like ' + Sq('DuoDuoHelper*') + ' } |' +
+         '  ForEach-Object { $p = Join-Path $_.FullName ' + Sq('bridge_config.json') + ';' +
+         '    if (Test-Path $p) { $cands += (Get-Item $p) } };' +
+         '$cands = $cands | Sort-Object LastWriteTime -Descending;' +
+         'foreach ($c in $cands) {' +
+         '  try { $j = Get-Content $c.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue };' +
+         '  if (-not $j.agent_token -or $j.agent_token -like ' + Sq('change-me*') + ') { continue };' +
+         '  $j.send_via_dll = $false; $j.recv_via_dll = $false;' +
+         '  if (-not $j.server_url) { $j.server_url = ' + Sq('http://47.112.219.14:18765') + ' };' +
+         '  $rt = Get-ChildItem (Join-Path $env:PUBLIC ' + Sq('PddPortableRuntime') + ') -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending;' +
+         '  if ($rt) { $logs = Join-Path $rt[0].FullName ' + Sq('plugins\logs') + ';' +
+         '    if ((Test-Path $logs) -and (-not $j.tanyu_log_dir -or -not (Test-Path $j.tanyu_log_dir))) { $j.tanyu_log_dir = $logs } };' +
+         '  ($j | ConvertTo-Json -Depth 6) | Set-Content -Path $dst -Encoding UTF8;' +
+         '  Write-Output (' + Sq('imported ') + ' + $c.FullName);' +
+         '  exit 0 };' +
+         'exit 0';
+  Exec(PsExe(), '-NoProfile -ExecutionPolicy Bypass -Command "' + Cmd + '"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := ResultCode = 0;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Left: Integer;
 begin
   Result := '';
   NeedsRestart := False;
+  CleanOldAutostart();
   if not KillBridgeProcesses() then
   begin
     Left := RemainingTargets();
@@ -279,6 +340,12 @@ begin
               '请先手动退出桥接助手（右下角托盘 → 退出），或结束这些进程后重试。' + #13#10 +
               '安装目录：' + ExpandConstant('{app}');
   end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    ImportExistingConfig();
 end;
 
 function InitializeUninstall(): Boolean;
