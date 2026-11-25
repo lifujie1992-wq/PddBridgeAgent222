@@ -1248,6 +1248,20 @@ class PddbridgeSource:
             self.port = primary
         log.info("pddbridge 会话已移除 %s（剩余 %d 个）", session.label(), len(self.sessions))
 
+    def _native_instance_ready(self, recv) -> bool:
+        """问 DLL 有没有拿到 CMChatImpl 实例（STATE 里的 INSTANCE 非 0）。"""
+        try:
+            reply = recv._command("STATE")
+        except Exception:
+            return False
+        if not isinstance(reply, str) or "INSTANCE" not in reply:
+            return False
+        try:
+            token = reply.split("INSTANCE", 1)[1].split()[0]
+            return int(token, 16) != 0
+        except (IndexError, ValueError):
+            return False
+
     def _apply_native_recv_config(self) -> None:
         """启用原生接收。
 
@@ -1267,9 +1281,34 @@ class PddbridgeSource:
             probe_path = Path(str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl"))
             probe_path = probe_path.with_name("pdd_recv_probe.log")
             mode = str(self.cfg.get("recv_engine") or "auto").strip().lower()
-            for _ in range(6):
-                if self._stop_evt.is_set():
-                    return
+
+            # ---- 第 1 段：先把实例拿到手 ----
+            # 构造函数钉不住（IAT 里没有、挂起注入也抓不到）时，用导出 detour 的副作用：
+            # NotifyWSMessage 第一次被调用时会把 this 记为实例。心跳几秒一次，很快就有。
+            if mode != "detour" and slot < 0 and not want_probe:
+                for attempt in range(8):
+                    if self._stop_evt.is_set():
+                        return
+                    if self._native_instance_ready(recv):
+                        break
+                    reply = recv.hook_install()
+                    if attempt == 0:
+                        log.info("原生接收：先用导出 detour 捕获工作台实例: %s", reply)
+                    for _ in range(10):        # 最多等 20 秒，等第一次回调
+                        if self._stop_evt.is_set() or self._native_instance_ready(recv):
+                            break
+                        time.sleep(2.0)
+                    if self._native_instance_ready(recv):
+                        log.info("原生接收：已捕获工作台实例，切换到全槽位嗅探")
+                        break
+                else:
+                    log.warning("原生接收：未能捕获工作台实例（工作台未登录？），暂用页面通道")
+
+            # 不再"重试 6 次就放弃"：工作台可能几十秒后才登录完成，
+            # 放弃了就永远停在页面通道（现场"重启后一直没有原生"就是这个）。
+            failures = 0
+            while not self._stop_evt.is_set():
+                failures += 1
                 if slot >= 0:
                     reply = recv.configure()
                     ok = reply and not reply.startswith("pipe_")
@@ -1292,9 +1331,11 @@ class PddbridgeSource:
                     log.info("原生接收已启动（%s）: %s", what, reply)
                     return
                 if reply and not reply.startswith("pipe_"):
-                    log.warning("原生接收启动被拒（%s）: %s", what, reply)
-                time.sleep(5.0)
-            log.warning("原生接收配置下发失败（管道未就绪），下轮重扫会重试")
+                    if failures <= 3 or failures % 12 == 0:
+                        log.warning("原生接收启动被拒（%s，第 %d 次）: %s", what, failures, reply)
+                elif failures <= 3 or failures % 12 == 0:
+                    log.info("原生接收：等待工作台就绪（第 %d 次）: %s", failures, reply)
+                time.sleep(10.0)
 
         threading.Thread(target=apply, daemon=True, name="pdd-native-cfg").start()
 

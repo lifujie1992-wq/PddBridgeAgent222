@@ -33,7 +33,7 @@ BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
 DEFAULT_BACKEND = "http://47.107.138.228:18765"
 DEFAULT_PORT = 18767
-LOCAL_GATEWAY_VERSION = "0.7.18.0"
+LOCAL_GATEWAY_VERSION = "0.7.20.0"
 _SENSITIVE_PROXY_HEADERS = {
     "host",
     "content-length",
@@ -580,13 +580,16 @@ class LocalSeatState:
                 waiting_since = self._message_sort_key(message)[0]
                 continue
             delivery = str(message.get("delivery_status") or "").lower()
-            source = str(message.get("source") or "").lower()
-            platform_echo = role == "mall_cs" and (
-                "bridge" in source or source.startswith("pdd_")
-            ) and delivery not in {"failed", "indeterminate", "accepted", "simulated", "dry_run"}
-            if role != "assistant_simulated" and (
-                platform_echo or delivery in {"confirmed", "sent", "delivered"}
-            ):
+            # 智能体已经回复过 → 对客服来说这条已经回了，倒计时必须停。
+            # 旧实现把 assistant_simulated 排除在外，导致"AI 明明回了、倒计时还在走"；
+            # 那时 AI 回复在本地库里的 role 就是 assistant_simulated（智能体气泡）。
+            if role == "assistant_simulated":
+                waiting_since = 0.0
+                continue
+            if role == "mall_cs":
+                # 只有明确失败/不确定才继续算"未回复"（等回执或人工兜底）
+                if delivery in {"failed", "indeterminate"}:
+                    continue
                 waiting_since = 0.0
         return {"waiting_for_reply": bool(waiting_since), "waiting_since": waiting_since}
 
