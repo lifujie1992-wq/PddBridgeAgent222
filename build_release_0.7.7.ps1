@@ -1,6 +1,6 @@
 ﻿# 拼多多桥接助手 0.7.7.0 —— 打包脚本（与 build_release.ps1 同流程，差异：
 #   1) Python 解释器可指定，默认 3.10，缺失时回落 py -3.12；
-#   2) 原生通道随包分发 pdd_send_v5.dll（v5 才带接收管道）+ injector.exe；
+#   2) 原生通道随包分发 pdd_send_v6.dll（含发图 SendImageMsg）+ injector.exe；
 #   3) PddJumpHelper.exe 缺失时从 0.7.6 交付包取一份，不让构建直接失败。
 param(
     [string]$OutputRoot = (Join-Path $PSScriptRoot "build-dist-release"),
@@ -113,14 +113,14 @@ Write-Host "Jump:    $jump"
 
 # --- 原生通道：v5 才有接收管道；v3 仅作老发送通道兜底 ---
 $nativeCopied = @()
-foreach ($name in @("pdd_send_v5.dll", "pdd_send_v3.dll", "injector.exe")) {
+foreach ($name in @("pdd_send_v6.dll", "pdd_send_v5.dll", "pdd_send_v3.dll", "injector.exe")) {
     $src = Join-Path $NativeOut $name
     if (Test-Path -LiteralPath $src) {
         Copy-Item -Force $src $agentBundle
         $nativeCopied += $name
     }
 }
-if ($nativeCopied -contains "pdd_send_v5.dll" -and $nativeCopied -contains "injector.exe") {
+if (($nativeCopied -contains "pdd_send_v6.dll" -or $nativeCopied -contains "pdd_send_v5.dll") -and $nativeCopied -contains "injector.exe") {
     Write-Host "Native:  $($nativeCopied -join ', ') (copied into agent bundle)"
 } else {
     Write-Warning "原生 DLL/注入器不全（已复制: $($nativeCopied -join ', ')），包里将没有原生通道"
@@ -128,7 +128,7 @@ if ($nativeCopied -contains "pdd_send_v5.dll" -and $nativeCopied -contains "inje
 
 $missing = @()
 foreach ($name in @("LocalSeatGateway.exe", "_gateway_internal", "PddAdsorbWindow.exe",
-                    "_adsorb_internal", "PddJumpHelper.exe", "pdd_send_v5.dll", "injector.exe")) {
+                    "_adsorb_internal", "PddJumpHelper.exe", "injector.exe")) {
     if (-not (Test-Path (Join-Path $agentBundle $name))) { $missing += $name }
 }
 if ($missing.Count -gt 0) { throw "agent bundle missing: $($missing -join ', ')" }

@@ -524,6 +524,22 @@ class PddbridgeSource:
                     "error_user": "拉取历史超时（页面未响应）"}
         return event.result
 
+    def send_image(self, uid, image_path, account, *, csid=None) -> dict:
+        """发本地图片（DLL SendImageMsg）。没有页面兼容路径，不可用就明确报错。"""
+        if self.direct_send is not None:
+            result = self.direct_send.send_image(uid, image_path, csid, account)
+            if result is not None:
+                self.send_count += 1
+                log.info("image send uid=%s account=%s ok=%s cost=%sms via=%s",
+                         uid, account, result.get("ok"), result.get("cost_ms"), result.get("via"))
+                return result
+        return {
+            "ok": False, "status": "unsupported", "real_send": False,
+            "retryable": False, "via": "dll_direct_image",
+            "error": "image_channel_unavailable",
+            "error_user": "当前版本不支持发图片（需要注入 pdd_send_v6.dll）",
+        }
+
     def send_and_wait(self, uid, content, account, *, timeout: float = 5.0, csid=None, is_expired=None) -> dict:
         """同步发送并等待回执。供 agent 命令线程调用（阻塞, 守护线程执行 eval）。"""
         if not self._thread or not self._thread.is_alive():

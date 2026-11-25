@@ -1107,7 +1107,7 @@ class BridgeAgent:
                 self._last_error = self.command_journal.last_error
                 log.error("command journal unavailable; refusing execution: %s", command_id)
                 continue
-            if cmd_type not in {"send_text", "open_chat", "pull_history", "session_state"}:
+            if cmd_type not in {"send_text", "send_image", "open_chat", "pull_history", "session_state"}:
                 result = {"ok": False, "status": "blocked", "real_send": False,
                           "retryable": False, "error": "unsupported_command_type"}
             elif cmd_type == "session_state":
@@ -1119,6 +1119,12 @@ class BridgeAgent:
                 result = {"ok": False, "status": "expired", "real_send": False,
                           "retryable": False, "via": "expired",
                           "error": "automatic_command_expired_or_unverifiable_time"}
+            elif cmd_type == "send_image":
+                gate = self._order_gate(cmd, account, buyer_id)
+                if gate is not None:
+                    result = gate
+                else:
+                    result = self._send_images_command(cmd, account, buyer_id)
             elif cmd_type == "pull_history":
                 # 直拉历史：按买家 uid 分页取，不抢界面焦点（应答走既有 list 帧流上报）
                 src = self.pddbridge_source
@@ -1220,6 +1226,18 @@ class BridgeAgent:
                 # 出站是单线程串行的（一次只发一条），这条耗时直接决定“AI 回复吞吐”上限：
                 # 容量 ≈ 1 / 平均耗时。实测日志里一半以上的指令→回显超过 10s，
                 # 需要区分是“探域 DLL 慢”还是“发送确认没匹配上干等到超时”。
+                # 话术库常常是「文字 + 图片」：文字发成功后继续把图片发出去，
+                # 结果合并到同一条命令回执里（部分失败也要如实回报）。
+                extra = self._send_followup_images(cmd, account, buyer_id, result)
+                if extra:
+                    result = dict(result or {})
+                    result["images"] = extra.get("images")
+                    if extra.get("image_errors"):
+                        result["image_errors"] = extra["image_errors"]
+                    if not result.get("ok") and extra.get("ok"):
+                        result["ok"] = True
+                        result["status"] = "sent"
+                        result["real_send"] = True
                 duration = time.monotonic() - started
                 log.info("command %s send done in %.2fs status=%s real_send=%s via=%s",
                          command_id, duration,
@@ -1246,6 +1264,90 @@ class BridgeAgent:
         if buf is None:
             buf = self._self_sends = deque(maxlen=400)
         return buf
+
+    @staticmethod
+    def _command_images(cmd: dict) -> list:
+        """从命令里取出图片列表（兼容几种常见字段）。"""
+        meta = cmd.get("meta") if isinstance(cmd.get("meta"), dict) else {}
+        values = []
+        for holder in (cmd, meta):
+            for key in ("images", "image_list", "image_urls", "pics"):
+                value = holder.get(key)
+                if isinstance(value, (list, tuple)):
+                    values.extend(str(v) for v in value if v)
+                elif isinstance(value, str) and value.strip():
+                    values.append(value.strip())
+            for key in ("image", "image_url", "image_path", "pic", "picture", "media_url"):
+                value = holder.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.append(value.strip())
+        # send_image 的正文本身就是图片地址
+        if str(cmd.get("type") or "").strip() == "send_image":
+            content = str(cmd.get("content") or "").strip()
+            if content:
+                values.insert(0, content)
+        seen, out = set(), []
+        for value in values:
+            if value not in seen:
+                seen.add(value)
+                out.append(value)
+        return out
+
+    def _send_images_command(self, cmd: dict, account: str, buyer_id: str) -> dict:
+        """type=send_image：把命令里的图片发出去。"""
+        images = self._command_images(cmd)
+        if not images:
+            return {"ok": False, "status": "blocked", "real_send": False, "retryable": False,
+                    "error": "no_image_in_command", "error_user": "命令里没有图片地址"}
+        extra = self._send_images(images, account, buyer_id, cmd)
+        results = extra.get("images") or []
+        ok_count = sum(1 for item in results if item.get("ok"))
+        first_error = next((item for item in results if not item.get("ok")), None)
+        result = {
+            "ok": ok_count > 0,
+            "status": "sent" if ok_count == len(results) and ok_count else "failed",
+            "real_send": ok_count > 0,
+            "retryable": ok_count == 0,
+            "via": "dll_direct_image",
+            "images": results,
+        }
+        if extra.get("image_errors"):
+            result["image_errors"] = extra["image_errors"]
+        if first_error:
+            result.setdefault("error", first_error.get("error") or "image_send_failed")
+            result.setdefault("error_user", first_error.get("error_user") or "图片发送失败")
+        return result
+
+    def _send_followup_images(self, cmd: dict, account: str, buyer_id: str,
+                              text_result: dict | None) -> dict | None:
+        """文字命令里带的图片，文字成功后继续发。"""
+        images = self._command_images(cmd)
+        if not images:
+            return None
+        # 文字已经失败（比如被闸门拦/内容非法）就别再补图了
+        if isinstance(text_result, dict) and text_result.get("ok") is False and                 text_result.get("real_send") is False:
+            return None
+        return self._send_images(images, account, buyer_id, cmd)
+
+    def _send_images(self, images: list, account: str, buyer_id: str, cmd: dict) -> dict:
+        from .media import localize_many
+
+        source = self.pddbridge_source
+        if source is None:
+            return {"images": [], "image_errors": ["pddbridge source 未启动"], "ok": False}
+        csid = cmd.get("csid") or None
+        paths, errors = localize_many(images)
+        results = []
+        for path in paths:
+            try:
+                item = source.send_image(buyer_id, path, account, csid=csid)
+            except Exception as exc:
+                item = {"ok": False, "status": "failed", "real_send": False,
+                        "error": str(exc), "error_user": "图片发送异常", "image_path": path}
+            results.append(item)
+            log.info("command image sent path=%s ok=%s", path, item.get("ok"))
+        return {"images": results, "image_errors": errors, "ok": bool(results) and all(
+            item.get("ok") for item in results)}
 
     def _order_lookup(self):
         """懒初始化订单查询器（与消息入线那套共用逻辑：面板定位/结果缓存/超时预算）。"""

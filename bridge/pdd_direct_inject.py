@@ -165,8 +165,8 @@ def ensure_injected(cfg: dict | None = None, *, wait_ready_s: float = 12.0) -> b
     """确保工作台已注入且直发就绪。返回是否就绪。"""
     cfg = cfg or {}
     pipe = str(cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
-                       alternates=("pdd_send_v3.dll",))
+    dll = resolve_tool(cfg.get("pdd_dll_path"), "pdd_send_v6.dll", DEFAULT_DLL,
+                       alternates=("pdd_send_v5.dll", "pdd_send_v3.dll"))
     injector = resolve_tool(cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
     dll_name = Path(dll).name
 
@@ -216,8 +216,8 @@ class InjectWatcher(threading.Thread):
 
     def run(self) -> None:
         pipe = str(self.cfg.get("send_via_dll_pipe") or DEFAULT_PIPE)
-        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v5.dll", DEFAULT_DLL,
-                           alternates=("pdd_send_v3.dll",))
+        dll = resolve_tool(self.cfg.get("pdd_dll_path"), "pdd_send_v6.dll", DEFAULT_DLL,
+                           alternates=("pdd_send_v5.dll", "pdd_send_v3.dll"))
         injector = resolve_tool(self.cfg.get("pdd_injector_path"), "injector.exe", DEFAULT_INJECTOR)
         dll_name = Path(dll).name
         while not self._stop_evt.wait(self.interval):
