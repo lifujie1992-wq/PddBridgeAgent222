@@ -670,7 +670,7 @@ class BridgeAgent:
                     "stats": diag}
         return {"ok": False, "reason": "log_idle", "idle_seconds": idle,
                 "stats": diag,
-                "detail": "日志通道已 %.0f 分钟没有新行（探域可能没在跑）"
+                "detail": "日志通道已 %.0f 分钟没有新行（拼多多工作台没在跑，或买家没发消息）"
                           % ((idle or idle_limit) / 60.0)}
 
     def _allowlist_enforced(self) -> bool:
@@ -697,7 +697,8 @@ class BridgeAgent:
             log.info("已开始 PDD CDP 实时监听（%s）", self.platform.label)
         else:
             self.watcher.start()  # 幂等
-            log.info("已开始监听本机探域日志（%s）", self.platform.label)
+            log.info("已开始监听本机 PDD 插件日志（%s）：%s", self.platform.label,
+                 self.cfg.get("tanyu_log_dir") or "")
 
     def _fallback_to_tanyu_logs(self) -> None:
         """CDP 源不可用时的处理（PddbridgeSource 降级回调, 线程安全）。

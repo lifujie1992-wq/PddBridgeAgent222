@@ -44,3 +44,18 @@ def test_empty_config_uses_packaged(tmp_path):
     app.mkdir()
     packaged = _touch(app / "pdd_send_v6.dll", 2_000_000)
     assert resolve_tool("", "pdd_send_v6.dll", "fallback", roots=[app]) == str(packaged)
+
+
+def test_fresh_config_does_not_enable_dll_injection(tmp_path):
+    """新装默认不注入：不开 DLL 直发、不写开发机路径。
+
+    0.8 默认 send_via_dll=True → 每条回复先失败一次（OK 0）+ 弹 UAC +
+    升级安装时工作台被 RestartManager 关掉。客户现网 0.7.6 是纯页面通道。
+    """
+    from bridge.config import load_config
+
+    cfg = load_config(path=None)
+    assert cfg["send_via_dll"] is False
+    assert cfg["recv_via_dll"] is False
+    assert cfg["pdd_dll_path"] == ""
+    assert cfg["pdd_injector_path"] == ""

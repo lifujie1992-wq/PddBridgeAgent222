@@ -220,6 +220,32 @@ def _shop_id_allowlist(value: Any) -> list[str]:
     return out
 
 
+_DATA_SOURCE_WARNED = False
+
+
+def _warn_if_cdp_only(cfg: dict[str, Any]) -> None:
+    """新装默认 data_source=cdp 时给一次明确警告（0.8.0–0.8.7 新装踩过）。
+
+    3.5.0.40 页面没有 JS socket → cdp 只能靠历史回拉，实时消息一条都收不到；
+    而便携包的 plugins/logs 就在机器上。看到这个组合就提示改回 tanyu_logs。
+    """
+    global _DATA_SOURCE_WARNED
+    if _DATA_SOURCE_WARNED:
+        return
+    if str(cfg.get("data_source") or "").lower() != "cdp":
+        return
+    found = default_log_dir()
+    if not found or not Path(found).is_dir():
+        return
+    _DATA_SOURCE_WARNED = True
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "data_source=cdp 但本机有 PDD 插件日志可读（%s）：3.5.0.40 页面无 JS socket，"
+        "cdp 收不到实时消息，建议改 data_source=tanyu_logs 并把 tanyu_log_dir 指向该目录",
+        found)
+
+
 def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, Any]:
     # Detect platform from filename when path given.
     cfg_path = path
@@ -363,13 +389,17 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "cdp_session_backoff_max_seconds": float(data.get("cdp_session_backoff_max_seconds") or 30.0),
         "cdp_rescan_seconds": float(data.get("cdp_rescan_seconds") or 20),
         "cdp_emit_history": bool(data.get("cdp_emit_history", False)),
-        # 可选：走注入 DLL 直发（需先注入, 未就绪自动回退 CDP）。默认关。
-        # 3.5.0.40 页面没有 JS socket，CDP 页面发送基本用不了；DLL 直发是唯一稳定通道，
-        # 默认打开（已注入时生效，未注入自动回退 CDP，不影响老行为）。
-        "send_via_dll": bool(data.get("send_via_dll", True)),
+        # 可选：走注入 DLL 直发（需先注入, 未就绪自动回退页面）。
+        # **默认关**，与客户现网稳定版 0.7.6 一致：
+        #   * 0.8 起默认开，结果每条发送先吃一次 OK 0、白丢 ~2 秒；
+        #   * 注入要 UAC，且 DLL 被工作台锁住 → 升级安装会把工作台关掉；
+        #   * 3.5.0.40 + v6 DLL 目前捕获不到实例（INSTANCE 0），直发不生效。
+        # 页面通道（__pddBridge_sendText + WS 回执）实测 2–4 秒 confirmed，
+        # 够用且不碰工作台。等 DLL 侧修好实例捕获再用配置打开。
+        "send_via_dll": bool(data.get("send_via_dll", False)),
         "send_via_dll_pipe": str(data.get("send_via_dll_pipe") or ""),
-        "pdd_dll_path": str(data.get("pdd_dll_path") or r"D:\temp\pdd-send-hook\out\pdd_send_v3.dll"),
-        "pdd_injector_path": str(data.get("pdd_injector_path") or r"D:\temp\pdd-send-hook\out\injector.exe"),
+        "pdd_dll_path": str(data.get("pdd_dll_path") or ""),
+        "pdd_injector_path": str(data.get("pdd_injector_path") or ""),
         # 原生接收（v0.7）: recv_via_dll 开启后从注入 DLL 收 push 帧；
         # recv_slot=-1 表示虚表槽位未确认（只允许探针模式），确认后填真实槽位号。
         "recv_via_dll": bool(data.get("recv_via_dll", False)),
@@ -399,6 +429,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
                 out[_key] = _new
         except (TypeError, ValueError):
             out[_key] = _new
+    _warn_if_cdp_only(out)
     out["_explicit_keys"] = sorted(k for k in data.keys() if not str(k).startswith("_"))
     if not out["agent_id"]:
         out["agent_id"] = (
@@ -524,7 +555,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "agent_name": f"{plat.label}-{socket.gethostname()}",
         "allowed_shop_ids": [],
         "enforce_allowed_shop_ids": False,
-        "tanyu_log_dir": DEFAULT_LOG_DIR,
+        # 新装默认就指向便携包里的插件日志目录（存在则自动发现），
+        # 不能写死开发机的 D:\kefuAgent\探域\... —— 客户机上那个目录根本不存在。
+        "tanyu_log_dir": default_log_dir(),
         "platform_version": "3.5.0.40",
         "poll_interval_ms": 200,
         "heartbeat_seconds": 5,
@@ -578,7 +611,9 @@ def write_example_config(path: Path | None = None, *, platform: str = "pdd") -> 
         "delivery_ledger_enabled": True,
         "delivery_ledger_path": "",
         "dry_run": False,
-        "data_source": "cdp",
+        # 3.5.0.40 页面没有 JS socket，CDP 收不到实时消息；插件日志才是唯一实时源。
+        # 这里写 cdp 会让新装客户“一条实时消息都收不到”（0.8.x 新装踩过）。
+        "data_source": "tanyu_logs",
         "cdp_auto_fallback": True,
         "cdp_fallback_after_seconds": 60,
         "cdp_port": None,
