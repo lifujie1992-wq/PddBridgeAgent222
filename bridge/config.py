@@ -51,6 +51,18 @@ _PATH_KEYS_V1 = (
 )
 
 
+PASSTHROUGH_KEYS = (
+    "history_pull_hot_seconds",
+    "history_pull_hot_window_seconds",
+    "history_pull_hot_max",
+    "workbench_watchdog_enabled",
+    "workbench_launcher",
+    "workbench_relaunch_grace_seconds",
+    "workbench_hang_kill_seconds",
+    "workbench_min_relaunch_interval_seconds",
+)
+
+
 def migrate_config(cfg_path: Path, data: dict[str, Any]) -> dict[str, Any]:
     """把老版本配置文件升级到当前版本（写回前先备份）。绝不影响启动。"""
     if not isinstance(data, dict):
@@ -305,6 +317,10 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "recv_slot": int(data.get("recv_slot") or -1),
         "recv_mode": int(data.get("recv_mode") or 0),
     }
+    # 1.0.7：这些可调项以前不在白名单里，写进配置文件也会被丢掉（1.0.5 的快车道参数就是这样失效的）
+    for key in PASSTHROUGH_KEYS:
+        if key in data:
+            out[key] = data[key]
     if not out["agent_id"]:
         out["agent_id"] = (
             f"{plat}-"
@@ -359,6 +375,9 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> Path:
         "recv_slot": int(cfg.get("recv_slot") or -1),
         "recv_mode": int(cfg.get("recv_mode") or 0),
     }
+    for key in PASSTHROUGH_KEYS:
+        if key in cfg:
+            payload[key] = cfg[key]
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     # utf-8 without BOM (PowerShell UTF8 encoding often adds BOM and breaks json.loads)
     cfg_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

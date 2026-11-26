@@ -1385,6 +1385,32 @@ class BridgeAgent:
             if not self._report_command_result(command_id, result):
                 break
 
+    def _pull_now_event(self) -> threading.Event:
+        ev = getattr(self, "_history_pull_now", None)
+        if ev is None:
+            ev = self._history_pull_now = threading.Event()
+        return ev
+
+    def _on_workbench_recovered(self) -> None:
+        """工作台被关/被杀后又回来了：重连 CDP，并立刻补拉一轮（不用等下一个 120s）。"""
+        src = getattr(self, "pddbridge_source", None)
+        if src is not None:
+            try:
+                src.reconnect()
+            except Exception as exc:
+                log.debug("cdp reconnect failed: %s", exc)
+        try:
+            self._resolve_log_dir()
+        except Exception:
+            pass
+
+        def _later():
+            # 页面要几秒才能重新注入；先等 CDP 挂上再拉
+            if not self._stop.wait(15.0):
+                self._pull_now_event().set()
+
+        threading.Thread(target=_later, name="bridge-pull-after-recover", daemon=True).start()
+
     def _history_pull_loop(self) -> None:
         """周期性对“最近出现过的会话”走 CDP 回拉历史。
 
@@ -1426,11 +1452,15 @@ class BridgeAgent:
         hot_max = max(1, _int("history_pull_hot_max", 10))
         tick = interval if hot_every <= 0 else max(1.0, min(hot_every, interval))
         next_full = time.monotonic() + interval
+        pull_now = self._pull_now_event()
         while not self._stop.is_set():
-            if self._stop.wait(tick):
+            woke = pull_now.wait(tick)
+            pull_now.clear()
+            if self._stop.is_set():
                 break
             now_m = time.monotonic()
-            full_round = now_m >= next_full
+            # 被看护唤醒（工作台刚恢复）：马上来一轮全量，补上断档期间的消息
+            full_round = woke or now_m >= next_full
             if full_round:
                 next_full = now_m + interval
             recent = getattr(self, "_recent_buyers", None) or {}
@@ -1538,6 +1568,10 @@ class BridgeAgent:
         self._start_feeds()
         if self.platform.name == "pdd":
             threading.Thread(target=self._log_dir_loop, name="bridge-log-dir", daemon=True).start()
+            from .workbench_watchdog import WorkbenchWatchdog
+            self._workbench_watchdog = WorkbenchWatchdog(self.cfg, self._stop, self._on_workbench_recovered)
+            threading.Thread(target=self._workbench_watchdog.run, name="bridge-workbench-watchdog",
+                             daemon=True).start()
         if self.platform.name == "pdd" and self.pddbridge_source is not None:
             try:
                 pull_seconds = float(self.cfg.get("history_pull_seconds") or 0)

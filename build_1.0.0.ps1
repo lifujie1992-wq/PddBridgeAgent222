@@ -51,6 +51,7 @@ $specRoot = Join-Path $PSScriptRoot "build-spec-release"
     --hidden-import bridge.pdd_context `
     --hidden-import bridge.watcher `
     --hidden-import bridge.log_dir_resolver `
+    --hidden-import bridge.workbench_watchdog `
     --hidden-import bridge.gui `
     --hidden-import bridge.platforms `
     --hidden-import bridge.platforms.pdd `
