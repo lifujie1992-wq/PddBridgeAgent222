@@ -33,7 +33,7 @@ BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
 DEFAULT_BACKEND = "http://47.107.138.228:18765"
 DEFAULT_PORT = 18767
-LOCAL_GATEWAY_VERSION = "1.0.5"
+LOCAL_GATEWAY_VERSION = "1.0.6"
 _SENSITIVE_PROXY_HEADERS = {
     "host",
     "content-length",
@@ -358,6 +358,20 @@ def _filter_replayed_callback_batches(messages: list[dict]) -> list[dict]:
     if not suppressed:
         return messages
     return [message for index, message in enumerate(messages) if index not in suppressed]
+
+
+def _seat_state_log(message: str) -> None:
+    stream = getattr(sys, "stderr", None)
+    try:
+        if stream is not None:
+            stream.write("[seat-state] " + message + "\n")
+    except Exception:
+        pass
+    try:
+        import logging
+        logging.getLogger("pdd.gateway").error(message)
+    except Exception:
+        pass
 
 
 class LocalSeatState:
@@ -760,10 +774,50 @@ class LocalSeatState:
         )
         return identity
 
-    def _load(self) -> None:
+    def _backup_existing(self) -> None:
+        """每次启动先留一份快照（最多 5 份）。现场 1.0.4→1.0.5 升级后会话被清成空且无备份。"""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
+            if not self.path.is_file() or self.path.stat().st_size <= 0:
+                return
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = self.path.with_name(self.path.name + ".bak-" + stamp)
+            if not backup.exists():
+                import shutil
+                shutil.copy2(self.path, backup)
+            olds = sorted(self.path.parent.glob(self.path.name + ".bak-*"))
+            for extra in olds[:-5]:
+                try:
+                    extra.unlink()
+                except OSError:
+                    pass
+        except OSError as exc:
+            _seat_state_log("本地会话快照失败: %s" % exc)
+
+    def _load(self) -> None:
+        self._backup_existing()
+        data = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                # utf-8-sig：PowerShell 5.1 写出的文件带 BOM，用 utf-8 读会失败，随后第一次保存
+                # 就会把一个空状态盖上去 —— 这是「会话被清空」最可能的路径之一。
+                data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+                break
+            except FileNotFoundError:
+                return
+            except Exception as exc:          # 被占用/写到一半：稍等重试
+                last_exc = exc
+                time.sleep(0.3)
+        if data is None:
+            try:
+                if self.path.is_file() and self.path.stat().st_size > 0:
+                    keep = self.path.with_name(
+                        self.path.name + ".unreadable-" + time.strftime("%Y%m%d-%H%M%S"))
+                    self.path.replace(keep)
+                    _seat_state_log("本地会话文件读不了(%s)，原文件已保留为 %s，本次从空状态开始"
+                                    % (last_exc, keep))
+            except OSError:
+                pass
             return
         if not isinstance(data, dict):
             return

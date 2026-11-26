@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -737,8 +738,48 @@ class LogWatcher:
             self._bump(source, "parse_errors")
             self.last_error = f"parse {source}: {exc}"
 
+    def request_log_dir(self, new_dir: str) -> None:
+        """换日志目录（线程安全：真正的切换在 watcher 自己的线程里做）。"""
+        if not self._thread or not self._thread.is_alive():
+            self._switch_log_dir(new_dir)
+        else:
+            self._requested_dir = str(new_dir)
+
+    def _switch_log_dir(self, new_dir: str) -> None:
+        if Path(new_dir) == self.log_dir:
+            return
+        try:
+            self._flush_pending(force=True)
+        except Exception:
+            pass
+        for handle in list(self._handles.values()):
+            try:
+                handle.close()
+            except Exception:
+                pass
+        old = self.log_dir
+        self.log_dir = Path(new_dir)
+        names = [name for name, _p, _n in self.attach_specs]
+        for table in (self._handles, self._paths, self._buffers, self.attached, self._known_paths,
+                      self._backlog_paths, self._identities, self._history_until,
+                      self._reading_history):
+            table.clear()
+        # 旧目录的游标对新目录没有意义；保留它会让新文件从头整份回放（几百条陈旧"历史"）。
+        # 新目录从文件尾开始跟，切换前漏掉的那一小段由 CDP 补拉兜底。
+        self._checkpoints = {k: v for k, v in self._checkpoints.items() if k not in names}
+        self._restored_sources = set(names)
+        self._multiline_candidates.clear()
+        logging.getLogger("pdd.bridge").warning("日志目录切换 %s -> %s", old, self.log_dir)
+
     def _run(self) -> None:
         while not self._stop.is_set():
+            requested = getattr(self, "_requested_dir", "")
+            if requested:
+                self._requested_dir = ""
+                try:
+                    self._switch_log_dir(requested)
+                except Exception as exc:
+                    self.last_error = f"switch log dir: {exc}"
             try:
                 for name, pattern, prefer_nonempty in self.attach_specs:
                     self._attach(name, pattern, prefer_nonempty=prefer_nonempty)

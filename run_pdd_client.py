@@ -764,6 +764,11 @@ def install_local_first() -> None:
             return
         message = stamp_message(_message_with_local_context(self, message))
         event = _event_from_message(self, message)
+        # 1.0.6：陈旧历史 / 补拉回放要在推本地工作台之前就拦下，
+        # 否则 127 工作台每轮补拉都会多出一批旧消息。
+        gate = getattr(self, "history_gate", None)
+        if gate is not None and gate(message, str(event.get("event_id") or event.get("idempotency_key") or "")):
+            return
         local_enabled = bool(self.cfg.get("dual_write_local_workbench", True))
         if local_enabled:
             self._local_delivery.enqueue(event, wake=False)

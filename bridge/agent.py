@@ -316,6 +316,73 @@ class BridgeAgent:
                        "event_id": str(event.get("event_id") or "")})
         return False
 
+    def _stale_history(self, msg: dict) -> bool:
+        """历史帧要不要直接丢（中心和本地工作台都不送）。"""
+        ts = float(msg.get("ts") or 0)
+        if ts <= 0:
+            # 没有平台时间的历史帧永远上送不了（history_ready 恒为 False），
+            # 会卡在待发队列里污染指标 —— 直接丢弃。
+            return True
+        try:
+            max_age = float(self.cfg.get("history_report_max_age_seconds") or 1800)
+        except (TypeError, ValueError):
+            max_age = 1800
+        # 1.0.6：时效上限对所有历史来源生效。以前只管 CDP 补拉；日志回补（换目录/游标对不上时
+        # 整份文件从头读）会把当天几百条旧消息当新事件送进中心，触发 brain 去回复早就聊完的买家。
+        if max_age > 0 and (time.time() - ts) > max_age:
+            return True
+        if str(msg.get("capture_source") or "").startswith("pdd_cdp"):
+            # CDP 补拉一次会带回十几条旧记录，卖家侧全量上送只会被中心 ignored/拒收。
+            user_only = str(self.cfg.get("history_report_user_only", "true")).strip().lower() \
+                not in {"0", "false", "no", "off", ""}
+            if user_only and str(msg.get("role") or "") != "user":
+                return True
+        return False
+
+    def _history_replay_seen(self, event_id: str, drop_if_seen: bool = True) -> bool:
+        """event_id 近 1 小时已经处理过且 drop_if_seen → True；否则记一笔返回 False。
+
+        实时帧也要记（drop_if_seen=False），这样之后补拉回放到同一条时能认出来。
+
+        补拉每轮都会把最近一段历史再回放一遍；事件上传成功后就不在待发队列里了，
+        只看待发队列的去重拦不住（现场单条最多入队 14 次）。
+        """
+        lock = getattr(self, "_seen_lock", None)
+        if lock is None:
+            lock = self._seen_lock = threading.Lock()
+        with lock:
+            seen = getattr(self, "_seen_event_ids", None)
+            if seen is None:
+                seen = self._seen_event_ids = {}
+            now_seen = time.monotonic()
+            eid = str(event_id or "")
+            if not eid:
+                return False
+            if drop_if_seen and now_seen - seen.get(eid, -1e9) < 3600.0:
+                return True
+            seen[eid] = now_seen
+            if len(seen) > 20000:
+                cutoff_seen = now_seen - 3600.0
+                for key in [k for k, v in seen.items() if v < cutoff_seen]:
+                    seen.pop(key, None)
+            return False
+
+    def history_gate(self, msg: dict, event_id: str) -> bool:
+        """给 local-first 包装层用：在推本地工作台之前拦下补拉的重复回放。
+
+        以前包装层先把事件推给 127 工作台、再进这里的过滤，于是每轮补拉回放
+        都进了本地会话。
+        """
+        if not msg.get("is_history"):
+            self._history_replay_seen(event_id, drop_if_seen=False)
+            return False
+        # 只拦「重复回放」。陈旧但第一次出现的历史照常进本地工作台展示，
+        # 只是不送中心（_on_local_event 里的 _stale_history），不会触发 AI 回复。
+        if self._history_replay_seen(event_id):
+            return True
+        msg["_history_gate_passed"] = True
+        return False
+
     def _on_local_event(self, msg: dict) -> None:
         from .pdd_system_messages import is_pdd_system_event
         if (msg.get("platform") or self.platform.name) == "pdd" and is_pdd_system_event(msg):
@@ -323,24 +390,8 @@ class BridgeAgent:
             log.info("PDD operator notice excluded from buyer stream msg_id=%s account=%s",
                      msg.get("msg_id"), msg.get("account"))
         msg = stamp_message(msg)
-        if msg.get("is_history"):
-            ts = float(msg.get("ts") or 0)
-            if ts <= 0:
-                # 没有平台时间的历史帧永远上送不了（history_ready 恒为 False），
-                # 会卡在待发队列里污染指标 —— 直接丢弃。
-                return
-            if str(msg.get("capture_source") or "").startswith("pdd_cdp"):
-                # 只对 CDP 补拉回来的历史做收敛（探域日志回补保持原行为）。
-                # CDP 补拉一次会带回十几条旧记录，全量上送只会被中心 ignored/拒收。
-                try:
-                    max_age = float(self.cfg.get("history_report_max_age_seconds") or 1800)
-                except (TypeError, ValueError):
-                    max_age = 1800
-                user_only = str(self.cfg.get("history_report_user_only", "true")).strip().lower() \
-                    not in {"0", "false", "no", "off", ""}
-                if (max_age > 0 and (time.time() - ts) > max_age) or \
-                        (user_only and str(msg.get("role") or "") != "user"):
-                    return
+        if msg.get("is_history") and self._stale_history(msg):
+            return
         account = str(msg.get("account") or "").strip()
         if account:
             self._accounts_seen[account] = time.time()
@@ -400,21 +451,10 @@ class BridgeAgent:
             with self._pending_lock:
                 if not hasattr(self, "_pending_ids"):
                     self._pending_ids = {e["event_id"] for e in self._pending}
-                # 补拉每轮都会把最近一段历史再回放一遍；事件上传成功后就不在待发队列里了，
-                # 原来的去重只看待发队列，于是同一条消息被反复入队（实测单条最多 14 次）。
-                # 这里额外记一份「近期已入队 event_id」，补拉回放命中就直接丢。
-                seen = getattr(self, "_seen_event_ids", None)
-                if seen is None:
-                    seen = self._seen_event_ids = {}
-                now_seen = time.monotonic()
-                eid = str(event["event_id"])
-                if event.get("is_history") and now_seen - seen.get(eid, -1e9) < 3600.0:
+                # 补拉回放去重（包装层已判过的历史帧不再判，否则会把自己判成重复）
+                check = bool(event.get("is_history")) and not msg.get("_history_gate_passed")
+                if self._history_replay_seen(str(event["event_id"]), drop_if_seen=check):
                     return
-                seen[eid] = now_seen
-                if len(seen) > 20000:
-                    cutoff_seen = now_seen - 3600.0
-                    for key in [k for k, v in seen.items() if v < cutoff_seen]:
-                        seen.pop(key, None)
                 if event["event_id"] in self._pending_ids:
                     log.info("event duplicate skipped id=%s（已在本机待发队列里）", event["event_id"])
                     self._ledger_note(event["event_id"], "center_duplicate_skipped", event=event,
@@ -611,7 +651,7 @@ class BridgeAgent:
             "platform_label": self.platform.label,
             "watching": self._active_watching(),
             "attached": attached,
-            "tanyu_log_dir": self.cfg.get("tanyu_log_dir"),
+            "tanyu_log_dir": str(getattr(self.watcher, "log_dir", "") or self.cfg.get("tanyu_log_dir") or ""),
             "data_source": self._data_source,
             "effective_source": effective,
             "accounts_seen": accounts,
@@ -661,8 +701,51 @@ class BridgeAgent:
             self.pddbridge_source.start()
             log.info("已开始 PDD CDP 实时监听（%s）", self.platform.label)
         else:
+            self._resolve_log_dir(startup=True)
             self.watcher.start()  # 幂等
-            log.info("已开始监听本机探域日志（%s）", self.platform.label)
+            log.info("已开始监听本机 PDD 插件日志（%s）：%s", self.platform.label,
+                     getattr(self.watcher, "log_dir", "") or self.cfg.get("tanyu_log_dir"))
+
+    def _resolve_log_dir(self, startup: bool = False) -> None:
+        """跟随拼多多工作台实际写日志的目录（PDDData.ini LogDir / 最近有写入的候选目录）。"""
+        if self.platform.name != "pdd":
+            return
+        from .log_dir_resolver import newest_write, resolve_active_log_dir, same_dir
+        if not hasattr(self.watcher, "request_log_dir"):
+            return
+        current = str(getattr(self.watcher, "log_dir", "") or "")
+        try:
+            resolved, source = resolve_active_log_dir(current)
+        except Exception as exc:
+            log.debug("log_dir resolve failed: %s", exc)
+            return
+        changed = bool(resolved) and not same_dir(resolved, current)
+        if changed:
+            self.watcher.request_log_dir(resolved)
+            self.cfg["tanyu_log_dir"] = resolved
+        if startup or changed:
+            mtime, files = newest_write(resolved if changed else current)
+            log.info("log_dir resolved=%s source=%s configured=%s last_write=%s files=%s",
+                     resolved if changed else current, source, current,
+                     time.strftime("%H:%M:%S", time.localtime(mtime)) if mtime else "-",
+                     sorted(files)[:12])
+        if not changed and not startup:
+            mtime, _files = newest_write(current)
+            if mtime and time.time() - mtime > 120:
+                self._last_log_idle_warn = getattr(self, "_last_log_idle_warn", 0.0)
+                if time.time() - self._last_log_idle_warn > 600:
+                    self._last_log_idle_warn = time.time()
+                    log.warning("插件日志目录 %s 已 %.0fs 没有新写入，也没找到别的在写的目录"
+                                "（拼多多工作台没在跑，或买家没发消息）", current, time.time() - mtime)
+
+    def _log_dir_loop(self) -> None:
+        while not self._stop.wait(30.0):
+            if self._effective_source == "cdp":
+                continue
+            try:
+                self._resolve_log_dir()
+            except Exception as exc:
+                log.debug("log_dir loop error: %s", exc)
 
     def _fallback_to_tanyu_logs(self) -> None:
         """CDP 源不可用时切回探域日志（PddbridgeSource 降级回调, 线程安全）。"""
@@ -670,6 +753,7 @@ class BridgeAgent:
             if self._effective_source == "tanyu_logs":
                 return
             self._effective_source = "tanyu_logs"
+            self._resolve_log_dir(startup=True)
             self.watcher.start()  # 幂等
         self._last_error = "CDP 通道未就绪，已自动降级到探域日志数据源"
         log.warning("已自动降级到探域日志数据源（data_source=%s）", self._data_source)
@@ -1452,6 +1536,8 @@ class BridgeAgent:
                 log.warning("websocket connect failed; HTTP fallback remains active: %s", exc)
 
         self._start_feeds()
+        if self.platform.name == "pdd":
+            threading.Thread(target=self._log_dir_loop, name="bridge-log-dir", daemon=True).start()
         if self.platform.name == "pdd" and self.pddbridge_source is not None:
             try:
                 pull_seconds = float(self.cfg.get("history_pull_seconds") or 0)

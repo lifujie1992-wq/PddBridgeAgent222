@@ -219,7 +219,11 @@ def test_business_message_enters_local_and_center_queues(tmp_path: Path, monkeyp
     }
     agent = BridgeAgent(cfg)
     try:
-        row = parse_line(_business_line(), "inside")[0]
+        # 1.0.6 起超过 history_report_max_age_seconds 的历史不送中心，样例要用当前时间
+        import time as _time
+        line = _business_line(timestamp=str(int(_time.time() * 1000))).replace(
+            "2026-08-18 22:00:00.123", _time.strftime("%Y-%m-%d %H:%M:%S") + ".123", 1)
+        row = parse_line(line, "inside")[0]
         agent._on_local_event(row)
         event_id = row["idempotency_key"]
         assert event_id in agent._local_delivery.pending_ids()
