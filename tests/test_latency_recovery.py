@@ -365,6 +365,8 @@ def test_history_pull_loop_pulls_recent_buyers():
     """tanyu 为主时，CDP 周期补拉只针对“最近出现过的会话”，并受 max_buyers 限制。"""
     agent = object.__new__(BridgeAgent)
     agent._stop = threading.Event()
+    agent._history_targets_loaded = True
+    agent._history_targets_saved_at = time.monotonic() + 1e9   # 不落盘
     agent.cfg = {"history_pull_seconds": 0.01, "history_pull_size": 5,
                  "history_pull_max_buyers": 2, "history_pull_gap_seconds": 0}
     calls = []
@@ -386,6 +388,40 @@ def test_history_pull_loop_pulls_recent_buyers():
     assert ("cs_1:2", "b1") in calls
     assert ("cs_1:2", "b2") in calls
     assert ("cs_1:2", "b3") not in calls          # 受 history_pull_max_buyers=2 限制
+
+
+def test_history_pull_loop_skips_offline_shops_and_keeps_hot_buyers():
+    """缓存了很多店、只登录一家：未登录店铺的买家不占回扫名额。"""
+    agent = object.__new__(BridgeAgent)
+    agent._stop = threading.Event()
+    agent._history_targets_loaded = True
+    agent._history_targets_saved_at = time.monotonic() + 1e9   # 不落盘
+    agent.cfg = {"history_pull_seconds": 0.01, "history_pull_size": 5,
+                 "history_pull_max_buyers": 2, "history_pull_gap_seconds": 0,
+                 "history_pull_workers": 1}
+    calls = []
+
+    class Src:
+        def has_online_session(self, account):
+            return account == "cs_1:2"
+
+        def pull_history(self, uid, account="", **kwargs):
+            calls.append((account, uid))
+            return {"ok": True}
+
+    agent.pddbridge_source = Src()
+    # 离线店的买家时间戳更新，旧实现会把它们排在前面占满名额
+    agent._recent_buyers = {("cs_9:9", "x1"): 9.0, ("cs_9:9", "x2"): 8.0,
+                            ("cs_1:2", "b1"): 3.0, ("cs_1:2", "b2"): 2.0}
+    thread = threading.Thread(target=agent._history_pull_loop, daemon=True)
+    thread.start()
+    deadline = time.time() + 3
+    while len(calls) < 2 and time.time() < deadline:
+        time.sleep(0.02)
+    agent._stop.set()
+    thread.join(timeout=2)
+    assert ("cs_1:2", "b1") in calls and ("cs_1:2", "b2") in calls
+    assert not [c for c in calls if c[0] == "cs_9:9"]
 
 
 def test_order_lookup_uses_one_total_deadline_and_reuses_target(monkeypatch):

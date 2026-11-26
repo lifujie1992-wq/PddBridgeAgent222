@@ -142,7 +142,7 @@ class _Session:
                  "lock", "actions", "worker", "failures", "next_attempt", "next_health",
                  "last_frame_at", "degraded_at", "sender_csid", "sender_csid_at", "last_batch",
                  "evals", "eval_ms_total", "eval_ms_max",
-                 "last_identity_refresh", "unresolved_since")
+                 "last_identity_refresh", "unresolved_since", "pull_q", "pull_thread")
 
     def __init__(self, port: int, target_url: str, cdp, cid: int, target_id: str = ""):
         self.port = port
@@ -163,6 +163,9 @@ class _Session:
         self.send_capable = False
         self.lock = threading.Lock()
         self.actions: "queue.Queue" = queue.Queue()
+        # 回拉历史单独一条队列+线程：不再和实时取帧挤在同一个 worker 里串行
+        self.pull_q: "queue.Queue" = queue.Queue()
+        self.pull_thread = None
         self.worker = None
         self.failures = 0
         self.next_attempt = 0.0
@@ -1554,9 +1557,44 @@ class PddbridgeSource:
                 elif name == "pull_history":
                     self._do_pull_history(*a)
                 continue
-            session.actions.put((name, a))
+            if name == "pull_history":
+                self._enqueue_pull(session, a)
+            else:
+                session.actions.put((name, a))
             self._wake.set()
         return reconnect
+
+    def has_online_session(self, account: str) -> bool:
+        """该店铺现在有没有在线会话。没登录的店铺回拉一定失败，调用方应直接跳过。"""
+        try:
+            return self._session_for_send(str(account or "")) is not None
+        except Exception:
+            return False
+
+    def _enqueue_pull(self, session: "_Session", args) -> None:
+        session.pull_q.put(args)
+        thread = session.pull_thread
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(target=self._pull_worker, args=(session,), daemon=True,
+                                      name="pdd-pull-%s" % (session.account or session.cid))
+            session.pull_thread = thread
+            thread.start()
+
+    def _pull_worker(self, session: "_Session") -> None:
+        """单店回拉线程：每次 eval 只占 session.lock 一瞬，实时取帧可以在两次回拉之间插进来。"""
+        while not self._stop_evt.is_set() and session in self.sessions:
+            try:
+                args = session.pull_q.get(timeout=5.0)
+            except queue.Empty:
+                return                      # 空闲退出，下次有任务再起
+            try:
+                self._do_pull_history(*args)
+            except Exception as exc:
+                log.warning("session pull_history failed (%s): %s", session.label(), exc)
+                try:
+                    args[-1].set()
+                except Exception:
+                    pass
 
     def _do_pull_history(self, uid, account, size, begin_msg_id, start_index, pre_msg_id, event) -> None:
         session = self._session_for_send(account)

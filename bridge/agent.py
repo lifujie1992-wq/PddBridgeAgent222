@@ -1972,6 +1972,7 @@ class BridgeAgent:
         self._ensure_history_targets()
         cursor = 0
         warned_empty = False
+        warned_offline = False
         # 按“起始时刻 + interval”排程，而不是“做完再等 interval”。
         deadline = time.monotonic()
         while not self._stop.is_set():
@@ -1983,6 +1984,18 @@ class BridgeAgent:
                 break
             recent = getattr(self, "_recent_buyers", None) or {}
             ordered = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)
+            # 只回拉「现在有在线会话」的店铺：缓存了 23 家、只登录 1 家时，
+            # 另外 22 家的买家回拉必然失败，却会占掉每轮名额、把真正在线店的买家挤到好几轮之后。
+            total_targets = len(ordered)
+            online = getattr(self.pddbridge_source, "has_online_session", None)
+            if online is not None:
+                ordered = [kv for kv in ordered if online(kv[0][0])]
+            if not ordered and total_targets:
+                if not warned_offline:
+                    warned_offline = True
+                    log.info("history pull: %d 个回扫目标都属于未登录店铺，本轮跳过", total_targets)
+                continue
+            warned_offline = False
             if not ordered:
                 # 没有候选 = 回扫根本不会发生。必须大声说出来，不能静默。
                 if not warned_empty:
@@ -1992,8 +2005,18 @@ class BridgeAgent:
                 continue
             warned_empty = False
             # 游标轮转：每轮从上次位置继续，保证尾部店铺也能被扫到（旧实现永远只看 top-N）
-            round_targets = [ordered[(cursor + i) % len(ordered)] for i in range(min(max_buyers, len(ordered)))]
-            cursor = (cursor + len(round_targets)) % len(ordered)
+            if len(ordered) <= max_buyers:
+                round_targets = list(ordered)
+            else:
+                # 一半名额永远给最近活跃的买家（刚说过话的最可能有新消息），
+                # 另一半游标轮转，保证久未出现的会话也会被扫到。
+                hot_n = max(1, max_buyers // 2)
+                hot = ordered[:hot_n]
+                rest = ordered[hot_n:]
+                cursor %= len(rest)
+                take = min(max_buyers - hot_n, len(rest))
+                round_targets = hot + [rest[(cursor + i) % len(rest)] for i in range(take)]
+                cursor = (cursor + take) % len(rest)
             started = time.monotonic()
             pulled = 0
             failed = 0
@@ -2042,8 +2065,8 @@ class BridgeAgent:
                 "last_round_seconds": round(elapsed, 2),
             }
             if pulled or failed:
-                log.info("history pull: %d/%d backfilled, %d failed, %.1fs (targets=%d cursor=%d)",
-                         pulled, len(round_targets), failed, elapsed, len(ordered), cursor)
+                log.info("history pull: %d/%d backfilled, %d failed, %.1fs (targets=%d online=%d cursor=%d)",
+                         pulled, len(round_targets), failed, elapsed, total_targets, len(ordered), cursor)
             self._save_history_targets()
 
     def _command_loop(self) -> None:
