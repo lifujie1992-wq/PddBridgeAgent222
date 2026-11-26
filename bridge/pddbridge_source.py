@@ -963,6 +963,13 @@ class PddbridgeSource:
                 reconnect = True
         return reconnect
 
+    def has_online_session(self, account: str) -> bool:
+        """该店铺现在有没有在线会话。没登录的店铺回拉一定失败，调用方应直接跳过。"""
+        try:
+            return self._session_for_send(str(account or "")) is not None
+        except Exception:
+            return False
+
     def _do_pull_history(self, uid, account, size, begin_msg_id, start_index, pre_msg_id, event) -> None:
         session = self._session_for_send(account)
         if session is None:

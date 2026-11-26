@@ -1316,7 +1316,14 @@ class BridgeAgent:
             if self._stop.wait(interval):
                 break
             recent = getattr(self, "_recent_buyers", None) or {}
-            targets = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)[:max_buyers]
+            ordered = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)
+            # 只回拉「现在有在线会话」的店铺：缓存了很多店、只登录一家时，
+            # 未登录店铺的买家回拉必然失败，却会占满 top-N 名额，把在线店的买家挤掉。
+            online = getattr(self.pddbridge_source, "has_online_session", None)
+            total_targets = len(ordered)
+            if online is not None:
+                ordered = [kv for kv in ordered if online(kv[0][0])]
+            targets = ordered[:max_buyers]
             pulled = 0
             for (account, buyer), _ts in targets:
                 if self._stop.is_set():
@@ -1328,7 +1335,8 @@ class BridgeAgent:
                     log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
                 self._stop.wait(gap)
             if pulled and not self._stop.is_set():
-                log.info("history pull: %d conversation(s) backfilled", pulled)
+                log.info("history pull: %d conversation(s) backfilled (targets=%d online=%d)",
+                         pulled, total_targets, len(ordered))
 
     def _command_loop(self) -> None:
         # 中心若不在长轮询里提前返回，20s 的等待会让 AI 回复排名延迟几十秒
