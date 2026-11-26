@@ -69,7 +69,7 @@ class ConfigDialog:
         self.vars = {
             "server_url": tk.StringVar(value=str(cfg.get("server_url") or "")),
             "websocket_url": tk.StringVar(value=str(
-                cfg.get("websocket_url") or "ws://47.107.138.228:18765/api/bridge/v1/ws"
+                cfg.get("websocket_url") or ""
             )),
             "websocket_enabled": tk.BooleanVar(value=bool(cfg.get("websocket_enabled", False))),
             "websocket_max_inflight": tk.StringVar(value=str(cfg.get("websocket_max_inflight") or 64)),

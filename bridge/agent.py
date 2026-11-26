@@ -400,6 +400,21 @@ class BridgeAgent:
             with self._pending_lock:
                 if not hasattr(self, "_pending_ids"):
                     self._pending_ids = {e["event_id"] for e in self._pending}
+                # 补拉每轮都会把最近一段历史再回放一遍；事件上传成功后就不在待发队列里了，
+                # 原来的去重只看待发队列，于是同一条消息被反复入队（实测单条最多 14 次）。
+                # 这里额外记一份「近期已入队 event_id」，补拉回放命中就直接丢。
+                seen = getattr(self, "_seen_event_ids", None)
+                if seen is None:
+                    seen = self._seen_event_ids = {}
+                now_seen = time.monotonic()
+                eid = str(event["event_id"])
+                if event.get("is_history") and now_seen - seen.get(eid, -1e9) < 3600.0:
+                    return
+                seen[eid] = now_seen
+                if len(seen) > 20000:
+                    cutoff_seen = now_seen - 3600.0
+                    for key in [k for k, v in seen.items() if v < cutoff_seen]:
+                        seen.pop(key, None)
                 if event["event_id"] in self._pending_ids:
                     log.info("event duplicate skipped id=%s（已在本机待发队列里）", event["event_id"])
                     self._ledger_note(event["event_id"], "center_duplicate_skipped", event=event,
@@ -1306,15 +1321,34 @@ class BridgeAgent:
             except (TypeError, ValueError):
                 return default
 
+        def _float(key, default):
+            try:
+                value = self.cfg.get(key)
+                return float(default if value is None else value)
+            except (TypeError, ValueError):
+                return default
+
         size = max(1, min(_int("history_pull_size", 20), 200))
         max_buyers = max(1, min(_int("history_pull_max_buyers", 40), 500))
         try:
             gap = max(0.0, float(self.cfg.get("history_pull_gap_seconds") or 0.3))
         except (TypeError, ValueError):
             gap = 0.3
+        # 快车道：实时 socket 常年没连上（state=none）时，没点开的会话只能靠回拉。
+        # 全量回拉 120s 一轮，买家最慢要等两分钟；所以对「最近刚说过话」的买家
+        # 另开一条 10s 的快车道，只拉这些人（默认最近 10 分钟、最多 10 个）。
+        hot_every = _float("history_pull_hot_seconds", 10.0)
+        hot_window = _float("history_pull_hot_window_seconds", 600.0)
+        hot_max = max(1, _int("history_pull_hot_max", 10))
+        tick = interval if hot_every <= 0 else max(1.0, min(hot_every, interval))
+        next_full = time.monotonic() + interval
         while not self._stop.is_set():
-            if self._stop.wait(interval):
+            if self._stop.wait(tick):
                 break
+            now_m = time.monotonic()
+            full_round = now_m >= next_full
+            if full_round:
+                next_full = now_m + interval
             recent = getattr(self, "_recent_buyers", None) or {}
             ordered = sorted(recent.items(), key=lambda kv: kv[1], reverse=True)
             # 只回拉「现在有在线会话」的店铺：缓存了很多店、只登录一家时，
@@ -1323,7 +1357,13 @@ class BridgeAgent:
             total_targets = len(ordered)
             if online is not None:
                 ordered = [kv for kv in ordered if online(kv[0][0])]
-            targets = ordered[:max_buyers]
+            if full_round:
+                targets = ordered[:max_buyers]
+                round_gap = gap
+            else:
+                cutoff = time.time() - hot_window
+                targets = [kv for kv in ordered if kv[1] >= cutoff][:hot_max]
+                round_gap = min(gap, 0.1)
             pulled = 0
             for (account, buyer), _ts in targets:
                 if self._stop.is_set():
@@ -1333,8 +1373,8 @@ class BridgeAgent:
                     pulled += 1
                 except Exception as exc:  # 单条失败不影响其他会话
                     log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
-                self._stop.wait(gap)
-            if pulled and not self._stop.is_set():
+                self._stop.wait(round_gap)
+            if pulled and full_round and not self._stop.is_set():
                 log.info("history pull: %d conversation(s) backfilled (targets=%d online=%d)",
                          pulled, total_targets, len(ordered))
 

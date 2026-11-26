@@ -181,6 +181,22 @@ def default_config_path(platform: str = "pdd") -> Path:
     return Path(__file__).resolve().parent.parent / name
 
 
+# 1.0.0 之前的默认中心。配置/GUI 里残留这个 ws 地址、而 HTTP 中心已是新地址时，
+# websocket 会连到别的机器上（现场实测：连上即被断，一晚 562 次）。
+_STALE_WS_HOSTS = ("47.107.138.228",)
+
+
+def _effective_websocket_url(data: dict[str, Any]) -> str:
+    ws = str(data.get("websocket_url") or "").strip()
+    if not ws:
+        return ""
+    server = str(data.get("server_url") or DEFAULT_SERVER_URL)
+    if any(h in ws for h in _STALE_WS_HOSTS) and not any(h in server for h in _STALE_WS_HOSTS):
+        log.warning("websocket_url 指向旧中心 %s，已改为跟随 server_url（%s）", ws, server)
+        return ""
+    return ws
+
+
 def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, Any]:
     # Detect platform from filename when path given.
     cfg_path = path
@@ -223,7 +239,7 @@ def load_config(path: Path | None = None, *, platform: str = "") -> dict[str, An
         "upload_batch_size": int(data.get("upload_batch_size") or 500),
         "upload_concurrency": int(data.get("upload_concurrency") or 16),
         "websocket_enabled": bool(data.get("websocket_enabled", False)),
-        "websocket_url": str(data.get("websocket_url") or ""),
+        "websocket_url": _effective_websocket_url(data),
         "websocket_path": str(data.get("websocket_path") or "/api/bridge/v1/ws"),
         "websocket_max_inflight": int(data.get("websocket_max_inflight") or 64),
         "upload_drain_budget_seconds": float(data.get("upload_drain_budget_seconds") or 3.0),
