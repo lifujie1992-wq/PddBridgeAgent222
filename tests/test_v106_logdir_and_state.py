@@ -19,7 +19,7 @@ def _touch(path, age=0.0):
 def test_ini_logdir_wins(tmp_path):
     exe_dir = tmp_path / "3.5.0.40_x64"
     new_logs = tmp_path / "tanyu3.2.2" / "logs"
-    new_logs.mkdir(parents=True)
+    _touch(new_logs / "inside_2026-11-27_1.log", age=5)   # 1.0.10：目录里得真有插件日志
     exe_dir.mkdir()
     (exe_dir / "PDDData.ini").write_text(
         "[common]\nPddMsgPlugin=D:/x.dll\nLogDir=%s\n" % str(new_logs).replace("\\", "/"),
@@ -119,3 +119,24 @@ def test_history_gate_blocks_replays_before_local_workbench():
     assert agent.history_gate(again, "e2") is True
     # 包装层放行过的，原逻辑里不能再把它判成重复
     assert agent._history_replay_seen("e2", drop_if_seen=False) is False
+
+
+def test_v1010_empty_ini_logdir_is_not_followed(tmp_path):
+    """现场：LogDir=.../3.5.0.40/logs 是空目录，插件写在 plugins/logs。1.0.6–1.0.9 会切到空目录。"""
+    runtime = tmp_path / "PddPortableRuntime" / "3.5.0.40"
+    ini_logs = runtime / "logs"
+    ini_logs.mkdir(parents=True)
+    plugin_logs = runtime / "plugins" / "logs"
+    _touch(plugin_logs / "3.5.0.40_PddMsgPlugin_x64.dll_2026-11-27.log", age=3)
+    resolved, source = r.resolve_active_log_dir(str(plugin_logs), ini_dirs=[str(ini_logs)], candidates=[])
+    assert r.same_dir(resolved, str(plugin_logs))
+    # 从空目录出发也能找回 plugins/logs
+    resolved, source = r.resolve_active_log_dir(str(ini_logs), ini_dirs=[str(ini_logs)], candidates=[])
+    assert r.same_dir(resolved, str(plugin_logs)) and source == "pddini"
+
+
+def test_v1010_describe_reports_candidates(tmp_path):
+    d = tmp_path / "logs"
+    _touch(d / "logrus.log", age=2)
+    info = r.describe(str(d))
+    assert info["current"]["files"] == 1 and info["current"]["last_write_age_s"] is not None

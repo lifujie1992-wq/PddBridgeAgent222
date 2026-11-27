@@ -124,26 +124,48 @@ def newest_write(log_dir: str) -> Tuple[float, List[str]]:
     return newest, names
 
 
+def ini_derived_dirs(ini_dirs: Iterable[str]) -> List[str]:
+    """PDDData.ini 的 LogDir 不一定就是插件写日志的目录。
+
+    现场（90 科技便携包）：LogDir=.../3.5.0.40/logs，插件实际写在 .../3.5.0.40/plugins/logs。
+    所以把 LogDir 本身、其下 plugins/logs、同级 plugins/logs 都列为候选。
+    """
+    out: List[str] = []
+    for d in ini_dirs:
+        for cand in (d, os.path.join(d, "plugins", "logs"),
+                     os.path.join(os.path.dirname(os.path.normpath(d)), "plugins", "logs")):
+            if cand and os.path.isdir(cand) and not any(same_dir(cand, x) for x in out):
+                out.append(cand)
+    return out
+
+
 def resolve_active_log_dir(current: str, *, idle_seconds: float = 120.0,
                            recent_seconds: float = 600.0, now: Optional[float] = None,
                            ini_dirs: Optional[List[str]] = None,
                            candidates: Optional[List[str]] = None) -> Tuple[str, str]:
-    """返回 (目录, 来源)。来源：pddini / config / recent_write。"""
+    """返回 (目录, 来源)。来源：pddini / config / recent_write。
+
+    1.0.10：只会换到「里面真有插件日志」的目录。1.0.6–1.0.9 无条件信 LogDir，
+    现场被换到一个空目录，inside/plugin 通道整个停掉。
+    """
     now = time.time() if now is None else now
     ini = ini_log_dirs() if ini_dirs is None else [d for d in ini_dirs if os.path.isdir(d)]
-    if ini:
-        if len(ini) == 1:
-            return ini[0], "pddini"
-        # 多个工作台指向不同目录：取最近写过的那个（watcher 只能盯一个目录）
-        best = max(ini, key=lambda d: newest_write(d)[0])
-        return best, "pddini"
     cur_mtime = newest_write(current)[0] if current else 0.0
-    if current and os.path.isdir(current) and now - cur_mtime <= idle_seconds:
+    derived = ini_derived_dirs(ini)
+    scored = [(newest_write(d)[0], d) for d in derived]
+    scored = [item for item in scored if item[0] > 0]
+    if scored:
+        best_mtime, best = max(scored)
+        if same_dir(best, current):
+            return current, "pddini"
+        if best_mtime >= cur_mtime:
+            return best, "pddini"
+    if current and os.path.isdir(current) and cur_mtime and now - cur_mtime <= idle_seconds:
         return current, "config"
-    pool = candidate_log_dirs() if candidates is None else candidates
+    pool = (candidate_log_dirs() if candidates is None else list(candidates)) + derived
     best_dir, best_mtime = "", 0.0
     for d in pool:
-        if _norm(d) == _norm(current):
+        if same_dir(d, current):
             continue
         mtime = newest_write(d)[0]
         if mtime > best_mtime:
@@ -151,6 +173,28 @@ def resolve_active_log_dir(current: str, *, idle_seconds: float = 120.0,
     if best_dir and now - best_mtime <= recent_seconds and best_mtime > cur_mtime:
         return best_dir, "recent_write"
     return current, "config"
+
+
+def describe(current: str, now: Optional[float] = None) -> dict:
+    """诊断用：当前目录、工作台 ini、各候选目录的文件数与最后写入距今秒数。"""
+    now = time.time() if now is None else now
+
+    def row(d: str) -> dict:
+        mtime, names = newest_write(d)
+        return {"dir": d, "files": len(names),
+                "last_write_age_s": round(now - mtime, 1) if mtime else None}
+
+    exe_dirs = workbench_exe_dirs()
+    ini_rows = []
+    for d in exe_dirs[:4]:
+        ini_rows.append({"exe_dir": d, "log_dir": _read_ini_logdir(os.path.join(d, "PDDData.ini"))})
+    seen: List[str] = []
+    rows = []
+    for d in [current] + ini_derived_dirs([r["log_dir"] for r in ini_rows if r["log_dir"]]) + candidate_log_dirs():
+        if d and not any(same_dir(d, x) for x in seen):
+            seen.append(d)
+            rows.append(row(d))
+    return {"current": row(current) if current else {}, "workbench": ini_rows, "candidates": rows[:10]}
 
 
 def same_dir(a: str, b: str) -> bool:

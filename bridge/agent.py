@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -316,6 +317,104 @@ class BridgeAgent:
                        "event_id": str(event.get("event_id") or "")})
         return False
 
+    # ---------------- 1.0.10 自带诊断（随心跳上报 + logs/diagnostics.json） ----------------
+    def _diag_note_event(self, msg: dict) -> None:
+        """记一笔：哪个通道、实时还是历史、从买家发出到本机拿到花了多久。不记内容。"""
+        try:
+            from collections import deque as _deque
+            ring = getattr(self, "_diag_events", None)
+            if ring is None:
+                ring = self._diag_events = _deque(maxlen=400)
+            ts = float(msg.get("ts") or 0)
+            cap = float(msg.get("captured_at") or 0) or time.time()
+            ring.append({
+                "at": time.time(),
+                "src": str(msg.get("capture_source") or msg.get("source") or "?")[:24],
+                "hist": bool(msg.get("is_history")),
+                "reason": str(msg.get("history_reason") or "")[:32],
+                "role": str(msg.get("role") or "")[:16],
+                "delay": round(cap - ts, 2) if ts > 0 else None,
+            })
+        except Exception:
+            pass
+
+    def _diag_channel_stats(self, window: float = 1800.0) -> dict:
+        ring = list(getattr(self, "_diag_events", None) or [])
+        now = time.time()
+        out: dict = {}
+        for row in ring:
+            if now - row["at"] > window or row.get("role") not in ("user", ""):
+                continue
+            item = out.setdefault(row["src"], {"n": 0, "live": 0, "history": 0, "promoted": 0,
+                                               "delays": [], "last_age_s": None, "reasons": {}})
+            item["n"] += 1
+            item["history" if row["hist"] else "live"] += 1
+            if row["reason"] == "fresh_pull_promoted":
+                item["promoted"] += 1
+            if row["hist"] and row["reason"]:
+                item["reasons"][row["reason"]] = item["reasons"].get(row["reason"], 0) + 1
+            if row["delay"] is not None:
+                item["delays"].append(row["delay"])
+            item["last_age_s"] = round(now - row["at"], 1)
+        for item in out.values():
+            d = sorted(item.pop("delays"))
+            if d:
+                item["delay_p50"] = d[len(d) // 2]
+                item["delay_p90"] = d[min(len(d) - 1, int(len(d) * 0.9))]
+                item["delay_max"] = d[-1]
+        return out
+
+    def _diagnostics_snapshot(self) -> dict:
+        snap: dict = {"v": 1, "at": round(time.time(), 1)}
+        try:
+            snap["log_dir"] = getattr(self, "_diag_logdir", None) or {}
+            watcher = getattr(self, "watcher", None)
+            files = {}
+            for name, path in list((getattr(watcher, "_paths", None) or {}).items()):
+                try:
+                    st = os.stat(path)
+                    files[name] = {"file": os.path.basename(path), "size": st.st_size,
+                                   "write_age_s": round(time.time() - st.st_mtime, 1)}
+                except OSError:
+                    files[name] = {"file": os.path.basename(str(path)), "missing": True}
+            snap["watching_dir"] = str(getattr(watcher, "log_dir", "") or "")
+            snap["attached_files"] = files
+            snap["channels_30m"] = self._diag_channel_stats()
+            src = getattr(self, "pddbridge_source", None)
+            if src is not None:
+                snap["cdp_sessions"] = [
+                    {"account": getattr(x, "account", ""), "socket": getattr(x, "socket_state", ""),
+                     "frames": getattr(x, "frames", 0)}
+                    for x in list(getattr(src, "sessions", None) or [])[:4]]
+                snap["cdp_drops"] = dict(getattr(src, "drops", None) or {})
+            snap["history_pull"] = getattr(self, "_diag_pull", None) or {}
+            dog = getattr(self, "_workbench_watchdog", None)
+            if dog is not None:
+                snap["workbench_watchdog"] = {"seen_running": dog.seen_running,
+                                              "launches_1h": len(dog.launches),
+                                              "missing": bool(dog.missing_since)}
+            lock = getattr(self, "_pending_lock", None)
+            if lock is not None:
+                with lock:
+                    pend = list(getattr(self, "_pending", None) or [])
+                snap["pending"] = {"total": len(pend),
+                                   "history": sum(bool(e.get("is_history")) for e in pend)}
+        except Exception as exc:
+            snap["error"] = str(exc)[:200]
+        return snap
+
+    def _write_diagnostics_file(self) -> None:
+        try:
+            base = Path(str(self.cfg.get("local_queue_path") or "bridge_queue.jsonl")).resolve().parent
+            path = base / "logs" / "diagnostics.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._diagnostics_snapshot(), ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            log.debug("write diagnostics failed: %s", exc)
+
     def _stale_history(self, msg: dict) -> bool:
         """历史帧要不要直接丢（中心和本地工作台都不送）。"""
         ts = float(msg.get("ts") or 0)
@@ -408,6 +507,7 @@ class BridgeAgent:
             log.info("PDD operator notice excluded from buyer stream msg_id=%s account=%s",
                      msg.get("msg_id"), msg.get("account"))
         msg = stamp_message(msg)
+        self._diag_note_event(msg)
         if msg.get("is_history") and self._stale_history(msg):
             return
         account = str(msg.get("account") or "").strip()
@@ -699,6 +799,7 @@ class BridgeAgent:
             "last_error": self._last_error or src_last_error or self.watcher.last_error,
             "websocket": self.client.transport_status(),
             "dry_run": bool(self.cfg.get("dry_run")),
+            "diagnostics": self._diagnostics_snapshot(),
         }
 
     def _allowlist_enforced(self) -> bool:
@@ -743,6 +844,14 @@ class BridgeAgent:
             log.debug("log_dir resolve failed: %s", exc)
             return
         changed = bool(resolved) and not same_dir(resolved, current)
+        try:
+            from .log_dir_resolver import describe
+            info = describe(resolved if changed else current)
+            info["source"] = source
+            info["switched_from"] = current if changed else ""
+            self._diag_logdir = info
+        except Exception as exc:
+            self._diag_logdir = {"error": str(exc)[:200]}
         if changed:
             self.watcher.request_log_dir(resolved)
             self.cfg["tanyu_log_dir"] = resolved
@@ -762,13 +871,14 @@ class BridgeAgent:
                                 "（拼多多工作台没在跑，或买家没发消息）", current, time.time() - mtime)
 
     def _log_dir_loop(self) -> None:
+        self._write_diagnostics_file()
         while not self._stop.wait(30.0):
-            if self._effective_source == "cdp":
-                continue
-            try:
-                self._resolve_log_dir()
-            except Exception as exc:
-                log.debug("log_dir loop error: %s", exc)
+            if self._effective_source != "cdp":
+                try:
+                    self._resolve_log_dir()
+                except Exception as exc:
+                    log.debug("log_dir loop error: %s", exc)
+            self._write_diagnostics_file()
 
     def _fallback_to_tanyu_logs(self) -> None:
         """CDP 源不可用时切回探域日志（PddbridgeSource 降级回调, 线程安全）。"""
@@ -1511,6 +1621,9 @@ class BridgeAgent:
                 except Exception as exc:  # 单条失败不影响其他会话
                     log.debug("history pull failed (%s/%s): %s", account, buyer, exc)
                 self._stop.wait(round_gap)
+            self._diag_pull = {"at": round(time.time(), 1), "full": bool(full_round),
+                               "targets": total_targets, "online": len(ordered), "pulled": pulled,
+                               "round_s": round(time.monotonic() - now_m, 2)}
             if pulled and full_round and not self._stop.is_set():
                 log.info("history pull: %d conversation(s) backfilled (targets=%d online=%d)",
                          pulled, total_targets, len(ordered))
