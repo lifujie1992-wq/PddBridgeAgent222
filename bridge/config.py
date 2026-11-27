@@ -60,6 +60,8 @@ PASSTHROUGH_KEYS = (
     "workbench_relaunch_grace_seconds",
     "workbench_hang_kill_seconds",
     "workbench_min_relaunch_interval_seconds",
+    "promote_fresh_pull",
+    "fresh_pull_max_age_seconds",
 )
 
 

@@ -383,6 +383,24 @@ class BridgeAgent:
         msg["_history_gate_passed"] = True
         return False
 
+    def _replace_pending_history(self, incoming: dict) -> bool:
+        """用实时事件替换待发队列里的同 event_id 历史副本。返回是否替换成功。"""
+        if incoming.get("is_history"):
+            return False
+        event_id = str(incoming.get("event_id") or "")
+        if not event_id:
+            return False
+        for index, pending in enumerate(self._pending):
+            if str(pending.get("event_id") or "") != event_id:
+                continue
+            if not pending.get("is_history"):
+                return False          # 两条都是实时：确实是重复
+            self._pending[index] = incoming
+            log.info("pending history event upgraded to live id=%s msg_id=%s",
+                     event_id, str(incoming.get("msg_id") or "")[:64])
+            return True
+        return False
+
     def _on_local_event(self, msg: dict) -> None:
         from .pdd_system_messages import is_pdd_system_event
         if (msg.get("platform") or self.platform.name) == "pdd" and is_pdd_system_event(msg):
@@ -456,6 +474,11 @@ class BridgeAgent:
                 if self._history_replay_seen(str(event["event_id"]), drop_if_seen=check):
                     return
                 if event["event_id"] in self._pending_ids:
+                    # 待发队列里已有同一条：那条是"历史"、这条是"实时"→ 替换（1.0.8）
+                    if self._replace_pending_history(event):
+                        self._ledger_note(event["event_id"], "history_upgraded", event=event,
+                                          detail="历史副本被实时帧替换")
+                        return
                     log.info("event duplicate skipped id=%s（已在本机待发队列里）", event["event_id"])
                     self._ledger_note(event["event_id"], "center_duplicate_skipped", event=event,
                                         detail="已在本机待发队列中")
