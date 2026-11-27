@@ -160,8 +160,10 @@ class Cdp:
     def contexts(self):
         return self._contexts
 
-    def eval(self, expression, context_id=None, return_by_value=True, timeout=8):
+    def eval(self, expression, context_id=None, return_by_value=True, timeout=8, await_promise=False):
         params = {"expression": expression, "returnByValue": return_by_value}
+        if await_promise:
+            params["awaitPromise"] = True
         if context_id:
             params["contextId"] = context_id
         r = self.send("Runtime.evaluate", params, timeout=timeout)

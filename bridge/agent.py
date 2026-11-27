@@ -391,6 +391,7 @@ class BridgeAgent:
                      "frames": getattr(x, "frames", 0)}
                     for x in list(getattr(src, "sessions", None) or [])[:4]]
                 snap["cdp_drops"] = dict(getattr(src, "drops", None) or {})
+                snap["send_server_verify"] = dict(getattr(src, "send_verify_stats", None) or {})
             snap["history_pull"] = getattr(self, "_diag_pull", None) or {}
             dog = getattr(self, "_workbench_watchdog", None)
             if dog is not None:

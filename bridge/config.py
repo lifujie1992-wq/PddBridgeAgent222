@@ -65,6 +65,8 @@ PASSTHROUGH_KEYS = (
     "send_verify_seconds",
     "inside_ipc_enabled",
     "inside_native_send",
+    "send_server_verify",
+    "send_resend_on_missing",
 )
 
 

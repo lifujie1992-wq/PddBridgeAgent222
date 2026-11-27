@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import sys
 import threading
@@ -284,6 +285,9 @@ class PddbridgeSource:
         # 降级不永久化: CDP 修好后（比如重装了正确版本的 PDD 工作台）自动切回。
         # 旧行为是降级后线程直接退出, 客户机只能重启/重装桥接才能恢复 —— 现场高频事故。
         self.on_recover = on_recover
+        # 1.0.14：发送后到服务器核对的统计（进诊断）
+        self.send_verify_stats = {"confirmed": 0, "confirmed_after_resend": 0, "resent": 0,
+                                  "failed": 0, "unknown": 0, "last_error": ""}
         # 1.0.11：发送已按「页面受理」返回之后，拼多多客户端才回的拒绝（以前直接丢掉）
         self.on_send_error = None
         self._degraded = False
@@ -463,7 +467,143 @@ class PddbridgeSource:
                     "error_user": "拉取历史超时（页面未响应）"}
         return event.result
 
+    # 1.0.14：直接问拼多多服务器要这个买家的聊天记录（HTTP，不依赖会话是否打开）。
+    # 工作台没打开该买家会话时，网页发出的请求拿不到任何回应（回执、拉历史都一样），
+    # 所以「等回执」永远等不到；服务器聊天记录才是「到底发没发到」的唯一准绳。
+    _SERVER_HISTORY_EXPR = (
+        "(function(uid,size){"
+        "var body={data:{cmd:'list',request_id:Date.now(),list:{with:{role:'user',id:String(uid)},"
+        "start_msg_id:null,start_index:0,size:size}},client:'WEB'};"
+        "return fetch('/plateau/chat/list',{method:'POST',credentials:'include',"
+        "headers:{'content-type':'application/json'},body:JSON.stringify(body)})"
+        ".then(function(r){return r.json();})"
+        ".then(function(j){var ms=(j&&j.result&&j.result.messages)||[];"
+        "return {ok:!!(j&&j.success),error:(j&&(j.error_msg||j.errorMsg||j.error_code))||'',"
+        "messages:ms.map(function(m){return {role:(m.from||{}).role||'',ts:m.ts,"
+        "content:String(m.content==null?'':m.content),msg_id:String(m.msg_id||''),type:m.type};})};})"
+        ".catch(function(e){return {ok:false,error:String(e)};});})(%s,%d)"
+    )
+
+    @staticmethod
+    def _sent_text_norm(value) -> str:
+        return re.sub(r"\s+", "", str(value or ""))
+
+    @classmethod
+    def match_server_history(cls, messages, content, since_ts: float) -> dict | None:
+        """服务器聊天记录里有没有我们刚发的这句（卖家方向、时间不早于发送前 15 秒）。"""
+        want = cls._sent_text_norm(content)
+        if not want:
+            return None
+        for row in messages or []:
+            if not isinstance(row, dict) or str(row.get("role") or "") != "mall_cs":
+                continue
+            try:
+                ts = float(row.get("ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            if ts > 100_000_000_000:
+                ts /= 1000.0
+            if ts and ts < since_ts - 15:
+                continue
+            got = cls._sent_text_norm(row.get("content"))
+            if got and (got == want or got[:48] == want[:48]):
+                return row
+        return None
+
+    def _do_verify_action(self, uid, content, account, since_ts, waiter) -> None:
+        session = self._session_for_send(account)
+        if session is None:
+            waiter.result = {"state": "unknown", "error": "session_unresolved"}
+            waiter.set()
+            return
+        expr = self._SERVER_HISTORY_EXPR % (json.dumps(str(uid)), 20)
+        try:
+            r = session.cdp.eval(expr, session.cid, timeout=6, await_promise=True)
+        except Exception as exc:
+            r = {"ok": False, "error": str(exc)}
+        if not isinstance(r, dict) or not r.get("ok"):
+            waiter.result = {"state": "unknown",
+                             "error": str((r or {}).get("error") if isinstance(r, dict) else r)[:160]}
+        else:
+            hit = self.match_server_history(r.get("messages"), content, since_ts)
+            waiter.result = ({"state": "found", "msg_id": str(hit.get("msg_id") or "")} if hit
+                             else {"state": "missing"})
+        waiter.set()
+
+    def verify_on_server(self, uid, content, account, since_ts: float, timeout: float = 8.0) -> dict:
+        """问服务器这句话到没到。返回 {"state": "found"|"missing"|"unknown", ...}。"""
+        waiter = _SendWaiter()
+        waiter.deadline = time.monotonic() + timeout
+        with self._lock:
+            self._act.append(("verify", (str(uid), str(content), str(account or ""), float(since_ts), waiter)))
+        self._wake.set()
+        waiter.wait(timeout)
+        return waiter.result if isinstance(waiter.result, dict) else {"state": "unknown", "error": "timeout"}
+
     def send_and_wait(self, uid, content, account, *, timeout: float = 5.0, csid=None, is_expired=None) -> dict:
+        """发送 → 没拿到回执就去服务器聊天记录核对 → 没有就重发一次 → 仍没有才报失败。
+
+        以服务器记录为准，所以重发不会造成重复（记录里已经有了就不会重发）。
+        开关：send_server_verify（默认开）、send_resend_on_missing（默认开）。
+        """
+        def _off(key):
+            return str(self.cfg.get(key, True)).strip().lower() in {"0", "false", "no", "off"}
+
+        stats = self.send_verify_stats
+        sent_at = time.time()
+        result = self._send_once(uid, content, account, timeout=timeout, csid=csid, is_expired=is_expired)
+        if _off("send_server_verify") or not isinstance(result, dict):
+            return result
+        if not (result.get("ok") and result.get("status") == "accepted" and result.get("echo_missing")):
+            return result
+        attempts = 1
+        while True:
+            state = "unknown"
+            verdict: dict = {}
+            for delay in (0.6, 1.2, 2.0, 2.5):
+                time.sleep(delay)
+                verdict = self.verify_on_server(uid, content, account, sent_at)
+                state = verdict.get("state") or "unknown"
+                if state != "missing":
+                    break
+            if state == "found":
+                stats["confirmed"] += 1
+                if attempts > 1:
+                    stats["confirmed_after_resend"] += 1
+                log.info("send verified on server uid=%s attempts=%d msg_id=%s", uid, attempts, verdict.get("msg_id"))
+                return {
+                    "ok": True, "status": "confirmed", "real_send": True, "via": "cdp+server",
+                    "buyer_id": str(uid), "msg_id": verdict.get("msg_id") or "",
+                    "send_attempts": attempts, "content": str(content),
+                }
+            if state != "missing":
+                stats["unknown"] += 1
+                stats["last_error"] = str(verdict.get("error") or "")[:120]
+                log.warning("send verify unavailable uid=%s: %s", uid, verdict.get("error"))
+                return result
+            # 服务器聊天记录里确实没有这句
+            if attempts >= 2 or _off("send_resend_on_missing") or (callable(is_expired) and is_expired()):
+                stats["failed"] += 1
+                log.warning("send NOT on server after %d attempt(s) uid=%s account=%s", attempts, uid, account)
+                return {
+                    "ok": False, "status": "failed", "real_send": False, "retryable": False,
+                    "via": "cdp_server_missing", "error": "server_history_missing",
+                    "buyer_id": str(uid), "send_attempts": attempts,
+                    "error_user": "已发送 %d 次，但拼多多服务器的聊天记录里没有这条消息，请人工回复" % attempts,
+                }
+            attempts += 1
+            stats["resent"] += 1
+            log.warning("send not on server, resending uid=%s account=%s", uid, account)
+            retry = self._send_once(uid, content, account, timeout=timeout, csid=csid, is_expired=is_expired)
+            if isinstance(retry, dict) and retry.get("status") == "confirmed":
+                stats["confirmed"] += 1
+                stats["confirmed_after_resend"] += 1
+                return {**retry, "send_attempts": attempts}
+            if not (isinstance(retry, dict) and retry.get("ok")):
+                stats["failed"] += 1
+                return retry if isinstance(retry, dict) else result
+
+    def _send_once(self, uid, content, account, *, timeout: float = 5.0, csid=None, is_expired=None) -> dict:
         """同步发送并等待回执。供 agent 命令线程调用（阻塞, 守护线程执行 eval）。
 
         1.0.3 拆分「排队没轮到执行」和「执行了没回执」：
@@ -1041,6 +1181,8 @@ class PddbridgeSource:
                 self._do_send_action(*a)
             elif name == "pull_history":
                 self._do_pull_history(*a)
+            elif name == "verify":
+                self._do_verify_action(*a)
             elif name == "reconnect":
                 reconnect = True
         return reconnect
