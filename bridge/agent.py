@@ -380,6 +380,7 @@ class BridgeAgent:
             snap["watching_dir"] = str(getattr(watcher, "log_dir", "") or "")
             snap["attached_files"] = files
             snap["channels_30m"] = self._diag_channel_stats()
+            snap["sends_30m"] = self._diag_sends()
             src = getattr(self, "pddbridge_source", None)
             if src is not None:
                 snap["cdp_sessions"] = [
@@ -508,6 +509,8 @@ class BridgeAgent:
                      msg.get("msg_id"), msg.get("account"))
         msg = stamp_message(msg)
         self._diag_note_event(msg)
+        if str(msg.get("role") or "") == "mall_cs":
+            self._match_send_echo(msg)
         if msg.get("is_history") and self._stale_history(msg):
             return
         account = str(msg.get("account") or "").strip()
@@ -1349,6 +1352,135 @@ class BridgeAgent:
             "ts": time.time(),
         })
 
+    # ---------------- 1.0.11 发送结果核对 ----------------
+    def _send_verify_seconds(self) -> float:
+        try:
+            return max(10.0, float(self.cfg.get("send_verify_seconds") or 60.0))
+        except (TypeError, ValueError):
+            return 60.0
+
+    def _track_send(self, event: dict, result: dict, verify: bool) -> None:
+        lock = getattr(self, "_send_lock", None)
+        if lock is None:
+            lock = self._send_lock = threading.Lock()
+        rec = {
+            "event": dict(event),
+            "buyer": str(event.get("buyer_id") or ""),
+            "account": str(event.get("account") or ""),
+            "key": _sent_text_key(event.get("content")),
+            "sent_at": time.time(),
+            "state": "pending" if verify else "confirmed",
+            "via": str(result.get("via") or ""),
+            "socket": str(result.get("socket_state") or ""),
+            "error": "",
+            "echo_delay": None,
+        }
+        with lock:
+            rows = getattr(self, "_send_records", None)
+            if rows is None:
+                from collections import deque as _deque
+                rows = self._send_records = _deque(maxlen=200)
+            rows.append(rec)
+
+    def _republish_send(self, rec: dict, status: str, error: str = "") -> None:
+        event = dict(rec["event"])
+        event["delivery_status"] = status
+        if error:
+            event["error"] = error[:200]
+        delivery = getattr(self, "_local_delivery", None)
+        q = getattr(self, "_local_ingest_queue", None)
+        try:
+            if delivery is not None:
+                delivery.enqueue(event)
+            elif q is not None:
+                q.put_nowait(event)
+        except Exception as exc:
+            log.debug("republish send status failed: %s", exc)
+
+    def _match_send_echo(self, msg: dict) -> None:
+        """卖家侧出现了和刚发出那条一样的话 → 确认真的发到了买家会话里。"""
+        rows = getattr(self, "_send_records", None)
+        if not rows:
+            return
+        buyer = str(msg.get("buyer_id") or "")
+        content = msg.get("content")
+        with self._send_lock:
+            for rec in rows:
+                if rec["state"] not in ("pending", "unconfirmed") or rec["buyer"] != buyer:
+                    continue
+                if not _same_sent_text(rec["event"].get("content"), content):
+                    continue
+                late = rec["state"] == "unconfirmed"
+                rec["state"] = "confirmed_echo"
+                rec["echo_delay"] = round(time.time() - rec["sent_at"], 1)
+                break
+            else:
+                return
+        log.info("AI 回复已在卖家侧出现 buyer=%s delay=%.1fs%s", buyer, rec["echo_delay"],
+                 "（超过核对时限后才出现）" if late else "")
+        self._republish_send(rec, "confirmed")
+
+    def _on_late_send_error(self, uid: str, content: str, error: str, account: str = "") -> None:
+        rows = getattr(self, "_send_records", None)
+        if not rows:
+            return
+        with self._send_lock:
+            for rec in reversed(rows):
+                if rec["buyer"] != str(uid) or rec["state"] == "failed":
+                    continue
+                if content and not _same_sent_text(rec["event"].get("content"), content):
+                    continue
+                rec["state"] = "failed"
+                rec["error"] = str(error or "")[:200]
+                break
+            else:
+                return
+        log.warning("AI 回复被拼多多客户端拒绝，没有发出 buyer=%s error=%s", uid, error)
+        self._republish_send(rec, "failed", "拼多多客户端拒绝发送: " + str(error or ""))
+
+    def _send_verify_loop(self) -> None:
+        while not self._stop.wait(5.0):
+            rows = getattr(self, "_send_records", None)
+            if not rows:
+                continue
+            limit = self._send_verify_seconds()
+            expired = []
+            with self._send_lock:
+                now = time.time()
+                for rec in rows:
+                    if rec["state"] == "pending" and now - rec["sent_at"] >= limit:
+                        rec["state"] = "unconfirmed"
+                        expired.append(rec)
+            for rec in expired:
+                log.warning("AI 回复 %.0fs 内没在卖家侧出现，可能没发出 buyer=%s via=%s socket=%s",
+                            limit, rec["buyer"], rec["via"], rec["socket"])
+                self._republish_send(rec, "indeterminate",
+                                     "%.0f 秒内没看到这条出现在买家会话里，可能没发出，请核对" % limit)
+
+    def _diag_sends(self, window: float = 1800.0) -> dict:
+        rows = list(getattr(self, "_send_records", None) or [])
+        now = time.time()
+        rows = [r for r in rows if now - r["sent_at"] <= window]
+        counts: dict = {}
+        delays = []
+        errors: dict = {}
+        for r in rows:
+            counts[r["state"]] = counts.get(r["state"], 0) + 1
+            if r["echo_delay"] is not None:
+                delays.append(r["echo_delay"])
+            if r["error"]:
+                errors[r["error"][:60]] = errors.get(r["error"][:60], 0) + 1
+        delays.sort()
+        out = {"n": len(rows), "states": counts, "errors": errors,
+               "recent": [{"buyer": r["buyer"][-6:], "age_s": round(now - r["sent_at"], 1),
+                           "state": r["state"], "via": r["via"], "socket": r["socket"],
+                           "echo_delay": r["echo_delay"], "error": r["error"][:60]}
+                          for r in rows[-15:]]}
+        if delays:
+            out["echo_delay_p50"] = delays[len(delays) // 2]
+            out["echo_delay_p90"] = delays[min(len(delays) - 1, int(len(delays) * 0.9))]
+        return out
+
     def _publish_self_reply(self, account: str, buyer_id: str, content: str,
                             result: dict | None = None) -> None:
         """把自己发出去的回复补写进本地会话（只推本机工作台，不上传中心）。
@@ -1366,6 +1498,9 @@ class BridgeAgent:
         if str(res.get("via") or "") == "dry_run":
             return
         ok = bool(res.get("ok"))
+        # 1.0.11：「页面已受理但没回执」不再直接算已发出 —— 现场有一条就是受理了却没到买家。
+        # 先标「已提交待确认」，由 _send_verify_loop 等卖家侧回显 / 客户端拒绝来定结果。
+        uncertain = bool(res.get("delivery_uncertain") or res.get("echo_missing"))
         if not ok and str(res.get("status") or "").lower() not in {"indeterminate", "accepted"}:
             return   # 明确失败的不写，避免把“没发出去”当成已回复
         text = str(content or "").strip()
@@ -1384,7 +1519,7 @@ class BridgeAgent:
             # 0.7.6 的倒计时只认 confirmed/sent/delivered（accepted 不算），
             # 页面受理（ok=True）就按已回复处理：买家实际收不到的概率远低于
             # “回执丢了导致倒计时永远不走”的代价。
-            "delivery_status": "confirmed" if ok else "indeterminate",
+            "delivery_status": ("accepted" if uncertain else "confirmed") if ok else "indeterminate",
             "source": "bridge_self_send",
             "is_history": False,
             "captured_at_ms": int(now * 1000),
@@ -1396,6 +1531,7 @@ class BridgeAgent:
                 q.put_nowait(event)
             log.info("self reply published locally buyer=%s delivery=%s",
                      buyer_id, event["delivery_status"])
+            self._track_send(event, res, verify=uncertain or not ok)
         except Exception as exc:
             log.debug("self reply publish skipped: %s", exc)
 
@@ -1704,6 +1840,9 @@ class BridgeAgent:
         self._start_feeds()
         if self.platform.name == "pdd":
             threading.Thread(target=self._log_dir_loop, name="bridge-log-dir", daemon=True).start()
+            threading.Thread(target=self._send_verify_loop, name="bridge-send-verify", daemon=True).start()
+            if self.pddbridge_source is not None:
+                self.pddbridge_source.on_send_error = self._on_late_send_error
             from .workbench_watchdog import WorkbenchWatchdog
             self._workbench_watchdog = WorkbenchWatchdog(self.cfg, self._stop, self._on_workbench_recovered)
             threading.Thread(target=self._workbench_watchdog.run, name="bridge-workbench-watchdog",

@@ -284,6 +284,8 @@ class PddbridgeSource:
         # 降级不永久化: CDP 修好后（比如重装了正确版本的 PDD 工作台）自动切回。
         # 旧行为是降级后线程直接退出, 客户机只能重启/重装桥接才能恢复 —— 现场高频事故。
         self.on_recover = on_recover
+        # 1.0.11：发送已按「页面受理」返回之后，拼多多客户端才回的拒绝（以前直接丢掉）
+        self.on_send_error = None
         self._degraded = False
         self._next_retry = 0.0
         self._push = _PushServer(on_payload=self._wake.set)
@@ -1200,6 +1202,16 @@ class PddbridgeSource:
                     "via": "cdp", "error_user": "拼多多客户端拒绝发送: " + error}
                 pending["event"].set()
                 log.warning("native send rejected buyer=%s error=%s", e.get("uid"), error)
+            else:
+                # 发送早已按「页面受理」返回，这是迟到的拒绝：交给 agent 把那条回复标成发送失败
+                error = str(e.get("error") or "native send rejected")
+                log.warning("native send rejected after accept buyer=%s error=%s", e.get("uid"), error)
+                callback = getattr(self, "on_send_error", None)
+                if callback is not None:
+                    try:
+                        callback(str(e.get("uid") or ""), str(e.get("content") or ""), error, hint)
+                    except Exception as exc:
+                        log.debug("on_send_error failed: %s", exc)
             return
         # localStorage 兕底重放的帧：是早前未送达的旧消息，按历史帧上报（中心自决要不要用）
         history_flag = bool(e.get("replayed"))
