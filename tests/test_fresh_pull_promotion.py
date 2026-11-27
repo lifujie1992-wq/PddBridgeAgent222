@@ -134,3 +134,37 @@ def test_live_push_upgrades_pending_history_copy():
     assert upgraded["is_history"] is False
     assert upgraded.get("supersedes_history") is True
     assert upgraded["history_reason"] == "fresh_push_supersedes_history"
+
+
+def _seller_push(ts_value, msg_id="m-seller"):
+    return {"cmd": "push", "target_id": 164945148, "message": {
+        "msg_id": msg_id, "content": "您好", "ts": ts_value,
+        "from": {"role": "mall_cs", "uid": "427302374", "mall_id": "427302374"},
+        "to": {"role": "user", "uid": "3000000000001"},
+    }}
+
+
+def test_earlier_seller_reply_in_ms_does_not_block_promotion():
+    """1.0.9：卖家帧 ts 是毫秒、买家消息 ts 是秒 —— 不归一化时任何一次更早的卖家回复
+    都会被当成「已回复」，补拉消息永远不提升（现场 1.0.8：7.9s 就补拉到仍等 90 秒）。"""
+    src, rows = _source()
+    src.feed_native_frame(_seller_push(int((time.time() - 120) * 1000)))
+    rows.clear()
+    src.feed_native_frame(_list_frame(age=5, msg_id="m-after-reply"))
+    assert rows and rows[0]["is_history"] is False
+    assert rows[0]["history_reason"] == "fresh_pull_promoted"
+
+
+def test_later_seller_reply_in_ms_still_blocks_promotion():
+    src, rows = _source()
+    src.feed_native_frame(_seller_push(int((time.time() - 1) * 1000)))
+    rows.clear()
+    src.feed_native_frame(_list_frame(age=5, msg_id="m-answered"))
+    assert rows and rows[0]["is_history"] is True
+
+
+def test_pull_found_after_45s_is_still_promoted():
+    """1.0.9：窗口 30s → 60s（现场一条 31.4s 才补拉到，差 1.4s 被压了 90 秒）。"""
+    src, rows = _source()
+    src.feed_native_frame(_list_frame(age=45, msg_id="m-45"))
+    assert rows and rows[0]["is_history"] is False

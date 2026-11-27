@@ -563,7 +563,10 @@ class PddbridgeSource:
     def _note_seller_reply(self, parsed: dict, hint: str = "") -> None:
         """记下「这个会话最后一次卖家回复的平台时间」，供补拉提升判断。"""
         try:
-            ts = float(parsed.get("ts") or 0)
+            from .parser import _normalize_ts
+            # 1.0.9：帧里的 ts 是毫秒，买家消息的 ts 已归一化成秒。不归一化的话，
+            # 任何一次更早的卖家回复都比买家消息「晚」，补拉提升永远被挡住。
+            ts = float(_normalize_ts(parsed.get("ts")) or 0)
         except (TypeError, ValueError):
             return
         if ts <= 0:
@@ -616,9 +619,9 @@ class PddbridgeSource:
         if not bool(self.cfg.get("promote_fresh_pull", True)):
             return msg
         try:
-            max_age = float(self.cfg.get("fresh_pull_max_age_seconds") or 30.0)
+            max_age = float(self.cfg.get("fresh_pull_max_age_seconds") or 60.0)
         except (TypeError, ValueError):
-            max_age = 30.0
+            max_age = 60.0
         account = str(msg.get("account") or "")
         buyer = str(msg.get("buyer_id") or "")
         try:
