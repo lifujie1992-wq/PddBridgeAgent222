@@ -1850,6 +1850,8 @@ class BridgeAgent:
                     from .inside_ipc import InsideIpcHost
                     self._inside_ipc = InsideIpcHost(self.cfg, self._stop)
                     self._inside_ipc.start()
+                    # 给发送通道选择用：插件由桥接接管时默认不走原生发送（见 platforms/pdd.py）
+                    self.cfg["_inside_ipc"] = self._inside_ipc
                 except Exception as exc:
                     log.warning("工作台插件连接服务启动失败（跳转仍走原路径）: %s", exc)
             if self.pddbridge_source is not None:
