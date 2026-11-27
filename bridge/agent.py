@@ -381,6 +381,9 @@ class BridgeAgent:
             snap["attached_files"] = files
             snap["channels_30m"] = self._diag_channel_stats()
             snap["sends_30m"] = self._diag_sends()
+            ipc = getattr(self, "_inside_ipc", None)
+            if ipc is not None:
+                snap["inside_ipc"] = ipc.status()
             src = getattr(self, "pddbridge_source", None)
             if src is not None:
                 snap["cdp_sessions"] = [
@@ -1841,6 +1844,14 @@ class BridgeAgent:
         if self.platform.name == "pdd":
             threading.Thread(target=self._log_dir_loop, name="bridge-log-dir", daemon=True).start()
             threading.Thread(target=self._send_verify_loop, name="bridge-send-verify", daemon=True).start()
+            # 1.0.12：替代探域注入器，让便携包里的 PddInsidePlugin 开出 0.7.6 的跳转/原生发送端口
+            if str(self.cfg.get("inside_ipc_enabled", True)).strip().lower() not in {"0", "false", "no", "off"}:
+                try:
+                    from .inside_ipc import InsideIpcHost
+                    self._inside_ipc = InsideIpcHost(self.cfg, self._stop)
+                    self._inside_ipc.start()
+                except Exception as exc:
+                    log.warning("工作台插件连接服务启动失败（跳转仍走原路径）: %s", exc)
             if self.pddbridge_source is not None:
                 self.pddbridge_source.on_send_error = self._on_late_send_error
             from .workbench_watchdog import WorkbenchWatchdog

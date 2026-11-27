@@ -49,7 +49,9 @@ class PddPlatform(PlatformBase):
         )
         # Prefer the native sender when available. A configured log directory
         # alone does not mean that sender exists on this computer.
-        if native.get("dll_ready") and (cfg.get("tanyu_log_dir") or not self._cdp_active(cfg)):
+        # 1.0.12：inside_native_send=false 时不走插件原生发送（插件端口仍用于跳转）
+        native_send = str(cfg.get("inside_native_send", True)).strip().lower() not in {"0", "false", "no", "off"}
+        if native_send and native.get("dll_ready") and (cfg.get("tanyu_log_dir") or not self._cdp_active(cfg)):
             return {**native, "platform": self.name, "send_channel": "tanyu"}
         if cfg.get("_pddbridge_source") is not None or self._cdp_active(cfg):
             from ..pddbridge_source import channel_status_cdp

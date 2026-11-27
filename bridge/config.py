@@ -63,6 +63,8 @@ PASSTHROUGH_KEYS = (
     "promote_fresh_pull",
     "fresh_pull_max_age_seconds",
     "send_verify_seconds",
+    "inside_ipc_enabled",
+    "inside_native_send",
 )
 
 
